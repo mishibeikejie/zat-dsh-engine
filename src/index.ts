@@ -200,6 +200,40 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (r.outcome.exitCode !== 0) throw new Error((r.stderr || r.stdout || 'write failed').slice(0, 500))
   }
 
+  /**
+   * Run a pnpm command with the user's system proxy inherited, then retry
+   * through the gh-proxy mirror when the direct attempt fails.
+   *
+   * git/pnpm do not read the Windows system proxy on their own; without the
+   * first step, `pnpm add github:...` fails even when the user's browser
+   * reaches GitHub through a VPN/proxy. The second step covers users with
+   * NO proxy at all (e.g. mainland China without a VPN): the git smart-HTTP
+   * request to github.com fails, so the retry rewrites github.com URLs onto
+   * gh-proxy.com through GIT_CONFIG_* environment variables — a per-process
+   * override that touches no global git configuration.
+   */
+  private async pnpmShell(command: string, dir: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+    const proxySetup = [
+      "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue;",
+      'if($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer){',
+      '  $s=\'\'+$p.ProxyServer;',
+      '  if($s -notmatch \'^https?://\'){ $s=\'http://\'+$s };',
+      '  $env:HTTPS_PROXY=$s; $env:HTTP_PROXY=$s; $env:ALL_PROXY=$s;',
+      '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
+      '};',
+    ].join(' ')
+    const mirrorRetry = [
+      command + ';',
+      'if ($LASTEXITCODE -ne 0) {',
+      '  $env:GIT_CONFIG_COUNT=1;',
+      "  $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
+      "  $env:GIT_CONFIG_VALUE_0='https://github.com/';",
+      '  ' + command + ';',
+      '}',
+    ].join(' ')
+    return this.runPowershell(proxySetup + ' ' + mirrorRetry, dir)
+  }
+
   private async getHome(): Promise<string> {
     if (this.home) return this.home
     const r = await this.runPowershell('$e=[Environment]::GetEnvironmentVariable("DSH_HOME","Process"); if(-not $e){ $e=Join-Path ([Environment]::GetFolderPath("UserProfile")) ".dsh" }; Write-Output $e')
@@ -435,7 +469,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async addSpec(owner: string, repo: string): Promise<{ ok: boolean; packageName: string | null; message?: string }> {
     const spec = 'github:' + owner + '/' + repo
     const dir = await this.getProfileDir()
-    const r = await this.runPowershell('pnpm add ' + spec, dir)
+    const r = await this.pnpmShell('pnpm add ' + spec, dir)
     if (r.outcome.exitCode !== 0) return { ok: false, packageName: null, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
     const after = await this.readProfile()
     const deps = Object.keys((after.dependencies || {}) as Record<string, string>)
@@ -660,7 +694,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     }
     const spec = 'github:' + owner + '/' + repo
     const dir = await this.getProfileDir()
-    const r = await this.runPowershell('pnpm add ' + spec, dir)
+    const r = await this.pnpmShell('pnpm add ' + spec, dir)
     if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
     return { ok: true, message: 'updated to v' + (await this.remoteVersion(owner, repo)) + ' — restart dsh to activate' }
   }
@@ -699,7 +733,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const n = String(name || '')
       const dir = await this.getProfileDir()
-      const r = await this.runPowershell('pnpm remove ' + n, dir)
+      const r = await this.pnpmShell('pnpm remove ' + n, dir)
       if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
       const after = await this.readProfile()
       const profile = ((after.dsh as JsonObject | undefined)?.profile || {}) as JsonObject

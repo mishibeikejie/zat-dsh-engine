@@ -8,6 +8,10 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -39,6 +43,8 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
@@ -52,7 +58,9 @@
     "@deepseek-ai/dsh-llm": "*",
     "react": "^18.2.0"
   },
-  "dependencies": {},
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
   "devDependencies": {
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
