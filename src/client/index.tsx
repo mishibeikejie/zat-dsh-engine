@@ -185,6 +185,10 @@ const css = `
 .zat-cover img{width:100%;height:100%;object-fit:cover;display:block}
 .zat-coverfallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:rgba(255,255,255,.85);letter-spacing:2px}
 .zat-badge{position:absolute;top:8px;right:8px;background:rgba(16,185,129,.92);color:#fff;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.zat-kindbadge{position:absolute;top:8px;left:8px;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.zat-kind-skill{background:rgba(217,119,6,.92);color:#fff}
+.zat-kind-nonplugin{background:rgba(90,100,120,.92);color:#fff}
+.zat-kind-multi{background:rgba(79,70,229,.92);color:#fff}
 .zat-updbadge{position:absolute;top:8px;right:8px;background:rgba(14,165,233,.95);color:#fff;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 .zat-zhbadge{position:absolute;bottom:6px;left:8px;background:rgba(20,30,60,.85);color:#9fc1ff;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid rgba(93,140,255,.3)}
 .zat-body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px;flex:1}
@@ -667,6 +671,9 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
         {coverErr
           ? <div className="zat-coverfallback">{String(item.name || '?').slice(0, 1).toUpperCase()}</div>
           : <img src={item.cover} loading="lazy" onError={() => setCoverErr(true)} alt={item.name} />}
+        {item.kind === 'skill' && <span className="zat-kindbadge zat-kind-skill">{zh ? '技能' : 'Skill'}</span>}
+        {item.kind === 'nonplugin' && <span className="zat-kindbadge zat-kind-nonplugin">{zh ? '非插件' : 'Not a plugin'}</span>}
+        {item.kind === 'multi' && <span className="zat-kindbadge zat-kind-multi">{zh ? '多插件' : 'Multi'}</span>}
         {hasUpdate
           ? <span className="zat-updbadge">↑ {t('有更新', 'Update')}</span>
           : item.installed
