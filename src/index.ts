@@ -15,11 +15,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 
 /** Host platform facts (this package is a plain Node ESM module). */
 const IS_WIN = process.platform === 'win32'
+
+/** Repositories that ARE the DeepSeek Harness itself (never installable). */
+const HARNESS_REPOS = ['deepseek-ai/deepseek-harness']
 
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
@@ -89,6 +92,8 @@ interface PluginListItem {
   homepage: string
   installed: boolean
   installedName: string | null
+  installedVersion?: string | null
+  isHarness?: boolean
   cover: string
 }
 
@@ -211,6 +216,35 @@ export class ZatMarketGateway extends TypertRemoteService {
   /** Write a file directly through node:fs (this package is trusted Node code). */
   private async writeFileText(path: string, content: string): Promise<void> {
     writeFileSync(path, content, 'utf8')
+  }
+
+  /**
+   * Probe for the running DeepSeek Harness version by walking up from the
+   * config tree's baseUrl and reading the installation package.json.
+   * Returns null when the installation cannot be located.
+   */
+  private harnessVersion(): string | null {
+    try {
+      const start = this.ctx.baseUrl as string | undefined
+      if (!start) return null
+      let current = start
+      for (let i = 0; i < 8; i++) {
+        const pkgPath = join(current, 'package.json')
+        if (existsSync(pkgPath)) {
+          try {
+            const meta = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string; version?: string }
+            const name = String(meta.name || '')
+            if ((name.startsWith('@deepseek-ai/dsh') || name === 'deepseek-harness') && meta.version) {
+              return meta.version
+            }
+          } catch { /* keep walking */ }
+        }
+        const parent = dirname(current)
+        if (parent === current) break
+        current = parent
+      }
+    } catch { /* best effort */ }
+    return null
   }
 
   /**
@@ -626,6 +660,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const cachedZh = this.zhCache.get(fullName.toLowerCase())
         const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
         const rec = inst[fullName.toLowerCase()] || inst[String(it.name || '').toLowerCase()]
+        const isHarness = HARNESS_REPOS.includes(fullName.toLowerCase())
         return {
           fullName,
           owner: it.owner ? it.owner.login : '',
@@ -640,8 +675,10 @@ export class ZatMarketGateway extends TypertRemoteService {
           updatedAt: it.updated_at || '',
           htmlUrl: it.html_url || '',
           homepage: it.homepage || '',
-          installed: rec ? true : false,
-          installedName: rec ? rec.name : null,
+          installed: isHarness || (rec ? true : false),
+          installedName: isHarness ? null : (rec ? rec.name : null),
+          installedVersion: isHarness ? this.harnessVersion() : null,
+          isHarness: isHarness || undefined,
           cover: 'https://opengraph.githubassets.com/1/' + fullName,
         } satisfies PluginListItem
       })
@@ -779,7 +816,20 @@ export class ZatMarketGateway extends TypertRemoteService {
           .trim()
         summary = clean.slice(0, 600)
       }
-      return { ok: true, readme, summary, image, isMonorepo }
+      const isHarness = HARNESS_REPOS.includes((o + '/' + r).toLowerCase())
+      const harnessLocal = isHarness ? this.harnessVersion() : null
+      const harnessRemote = isHarness ? await this.remoteVersion(o, r) : null
+      return {
+        ok: true,
+        readme,
+        summary,
+        image,
+        isMonorepo,
+        isHarness: isHarness || undefined,
+        harnessVersion: harnessLocal,
+        harnessRemote,
+        harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && harnessLocal !== harnessRemote),
+      }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }

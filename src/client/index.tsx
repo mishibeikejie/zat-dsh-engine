@@ -40,6 +40,7 @@ interface MarketItem {
   installedVersion?: string | null
   latestVersion?: string | null
   hasUpdate?: boolean
+  isHarness?: boolean
 }
 
 interface MarketListResult {
@@ -449,6 +450,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   function cardAction(item: MarketItem): void {
+    if (item.isHarness) { setDetail(item); return }
     if (item.installed && item.hasUpdate) doUpdate(item)
     else if (!item.installed) doInstall(item)
     else setDetail(item)
@@ -480,13 +482,15 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   if (detail) {
     const dd = detailData
     const ddesc = (zh && detail.zhIntro) ? detail.zhIntro : (detail.description || '')
-    const mainBtn = !detail.installed
-      ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
-      : detail.installed && detail.hasUpdate
-        ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
-        : detail.installed
-          ? <button className="zat-btn zat-installed" disabled>✓ {t('已是最新', 'Up to date')}</button>
-          : null
+    const mainBtn = detail.isHarness
+      ? null
+      : !detail.installed
+        ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
+        : detail.installed && detail.hasUpdate
+          ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
+          : detail.installed
+            ? <button className="zat-btn zat-installed" disabled>✓ {t('已是最新', 'Up to date')}</button>
+            : null
     return (
       <div className="zat-panel">
         <div className="zat-bar">
@@ -505,6 +509,17 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             {detail.installed && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
             {detail.hasUpdate && detail.latestVersion && <span className="zat-ver">{t('最新 v', 'Latest v')}{detail.latestVersion}</span>}
           </div>
+          {detail.isHarness && (
+            <div className="zat-summary">
+              <span className="zat-zhlabel">{t('DeepSeek Harness 本体:', 'DeepSeek Harness itself:')}</span>
+              {dd && dd.harnessVersion
+                ? `${t('你正在使用 v', 'You are running v')}${String(dd.harnessVersion)}。`
+                : `${t('你正在使用它。', 'You are using it.')}`}
+              {dd && dd.harnessHasUpdate && dd.harnessRemote
+                ? ` ${t('官方已发布新版本 v', 'A newer version v')}${String(dd.harnessRemote)}${t(',请到官方 Release 页面按你的安装方式更新。', ', please update through the official release page using your install method.')}`
+                : ''}
+            </div>
+          )}
           {ddesc && <div className="zat-summary"><span className="zat-zhlabel">{t('简介:', 'About:')}</span>{ddesc}</div>}
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
           {dd
@@ -512,7 +527,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>}
           <div className="zat-actions">
             {mainBtn}
-            {detail.installed && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
+            {detail.installed && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
             <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>
           </div>
           {notice && <div className="zat-notice">{notice}</div>}
@@ -600,7 +615,11 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
   const btnClass = hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install')
-  const btnText = installing ? t('处理中…', '...') : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
+  const btnText = installing
+    ? t('处理中…', '...')
+    : item.isHarness
+      ? (zh ? '✓ 使用中' : '✓ In use')
+      : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
   return (
     <div className="zat-card" onClick={() => onOpen(item)}>
       <div className="zat-cover">
@@ -610,7 +629,7 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
         {hasUpdate
           ? <span className="zat-updbadge">↑ {t('有更新', 'Update')}</span>
           : item.installed
-            ? <span className="zat-badge">✓ {t('已安装', 'Installed')}</span>
+            ? <span className="zat-badge">{item.isHarness ? (zh ? '本机' : 'Local') : `✓ ${t('已安装', 'Installed')}`}</span>
             : null}
         {(zh && item.zhIntro) ? <span className="zat-zhbadge">中文简介</span> : null}
       </div>
