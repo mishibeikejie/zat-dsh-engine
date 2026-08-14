@@ -491,7 +491,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   if (detail) {
     const dd = detailData
     const ddesc = (zh && detail.zhIntro) ? detail.zhIntro : (detail.description || '')
-    const mainBtn = detail.isHarness
+    const mainBtn = detail.isHarness || Boolean(dd && dd.notPlugin)
       ? null
       : !detail.installed
         ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
@@ -527,6 +527,13 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
               {dd && dd.harnessHasUpdate && dd.harnessRemote
                 ? ` ${t('官方已发布新版本 v', 'A newer version v')}${String(dd.harnessRemote)}${t(',请到官方 Release 页面按你的安装方式更新。', ', please update through the official release page using your install method.')}`
                 : ''}
+            </div>
+          )}
+          {Boolean(dd && dd.notPlugin) && (
+            <div className="zat-subchoices">
+              <div className="zat-subchoices-title">
+                {t('这不是可安装的 dsh 插件:仓库里没有插件声明,它可能是一个技能包或代码仓库(只是打了 dsh-plugin 标签)。请到 GitHub 查看它的使用方式。', 'Not an installable dsh plugin: this repository declares no plugin — it may be a skill pack or code repo that merely carries the dsh-plugin topic. Check GitHub for usage instructions.')}
+              </div>
             </div>
           )}
           {detail.disabled && !detail.isHarness && (

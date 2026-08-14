@@ -829,6 +829,11 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (!o || !r) return { ok: false, message: 'invalid repository name' }
       const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
       const isMonorepo = rootPkg.status !== 200
+      let notPlugin = false
+      if (isMonorepo) {
+        const sub = await this.subpackages(o, r)
+        notPlugin = !(sub.ok && Array.isArray(sub.packages) && sub.packages.length > 0)
+      }
       const files = ['README.zh.md', 'README_zh.md', 'README.md', 'readme.md', 'README.en.md']
       let readme = ''
       let image: string | null = null
@@ -855,6 +860,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         summary,
         image,
         isMonorepo,
+        notPlugin: notPlugin || undefined,
         isHarness: isHarness || undefined,
         harnessVersion: harnessLocal,
         harnessRemote,
@@ -945,7 +951,7 @@ export class ZatMarketGateway extends TypertRemoteService {
             }
             return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
           }
-          return { ok: false, message: '这个仓库没有找到可安装的插件,请到 GitHub 页面查看说明。' }
+          return { ok: false, message: '这个仓库不是可安装的 dsh 插件:里面没有找到插件声明(dsh.bundle)。它可能是一个技能包、工具库或代码仓库(只是打了 dsh-plugin 标签),无法通过市场一键安装。请到该仓库的 GitHub 页面查看它的使用方式。' }
         }
       }
       const res = await this.addSpec(o, r, s || undefined)
