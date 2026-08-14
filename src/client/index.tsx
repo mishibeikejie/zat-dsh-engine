@@ -202,12 +202,17 @@ const css = `
 .zat-cardbtn.zat-install{background:linear-gradient(90deg,#3d6bff,#7a4dff);color:#fff}
 .zat-cardbtn.zat-update{background:linear-gradient(90deg,#0ea5e9,#22d3ee);color:#fff}
 .zat-cardbtn.zat-installed{background:var(--color-bg3,#1d2b21);color:#34d399;border:1px solid rgba(52,211,153,.35)}
-.zat-cardbtn.zat-noninstall{background:#3a2a1a;color:#fbbf24;border:1px solid rgba(251,191,36,.4)}
+.zat-cardbtn.zat-noninstall{background:#3a2414;color:#fb923c;border:1px solid rgba(251,146,60,.4)}
+.zat-cardbtn.zat-disabled{background:#33271a;color:#f0a94b;border:1px solid rgba(240,169,75,.35)}
 .zat-cardbtn.zat-nonplugin{background:var(--color-bg3,#22252e);color:var(--color-fg3,#8b94a5);border:1px solid var(--color-border,#ffffff14)}
 .zat-status{text-align:center;padding:40px 0;color:var(--color-fg3,#7c8698);font-size:13px}
 .zat-status.zat-error{color:#f87171}
 .zat-foot{display:flex;justify-content:center;align-items:center;gap:10px;padding:6px 0;flex-wrap:wrap}
 .zat-count{font-size:11.5px;color:var(--color-fg3,#5d6676)}
+.zat-legend{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px;padding:6px 12px;font-size:11px;color:var(--color-fg3,#9aa4b5)}
+.zat-legend .zat-lghead{font-weight:650;color:var(--color-fg2,#c3ccdb)}
+.zat-legend .zat-lgi{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.zat-legend .zat-lgi i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
 .zat-detail{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;padding:2px}
 .zat-dcover{width:100%;max-width:480px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:var(--color-bg2,#1c2333);border:1px solid var(--color-border,#ffffff14)}
@@ -300,6 +305,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
+  const [showLegend, setShowLegend] = useState(true)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -602,7 +608,20 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <option value="uninstalled">{t('未安装', 'Not installed')}</option>
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
+        <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
+      {showLegend && (
+        <div className="zat-legend">
+          <span className="zat-lghead">{t('标签说明', 'Badge guide')}:</span>
+          <span className="zat-lgi"><i style={{ background: '#10b981' }} />✓ {t('已安装(已启用)', 'Installed (enabled)')}</span>
+          <span className="zat-lgi"><i style={{ background: '#0ea5e9' }} />↑ {t('有更新', 'Update available')}</span>
+          <span className="zat-lgi"><i style={{ background: '#7a4dff' }} />{t('安装', 'Install')}</span>
+          <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·不可安装', 'Skill · not installable')}</span>
+          <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
+          <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
+          <span className="zat-lgi"><i style={{ background: '#f0a94b' }} />{t('已装·未启用', 'Installed, disabled')}</span>
+        </div>
+      )}
       {notice && <div className="zat-notice">{notice}</div>}
       {subChoices && (
         <div className="zat-subchoices">
@@ -651,9 +670,11 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
   const nonInstallable = item.kind === 'skill' || item.kind === 'nonplugin'
-  const btnClass = nonInstallable
-    ? (item.kind === 'skill' ? 'zat-noninstall' : 'zat-nonplugin')
-    : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
+  const btnClass = item.disabled
+    ? 'zat-disabled'
+    : nonInstallable
+      ? (item.kind === 'skill' ? 'zat-noninstall' : 'zat-nonplugin')
+      : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
   const btnText = installing
     ? t('处理中…', '...')
     : item.isHarness

@@ -121,7 +121,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.3.0'
+const SELF_VERSION = '0.3.1'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
