@@ -45,6 +45,8 @@ interface MarketItem {
   disabled?: boolean
   /** Repo kind: plugin | nonplugin | multi | skill. */
   kind?: string
+  /** The current GitHub user has starred this repo (needs a token). */
+  starred?: boolean
 }
 
 interface MarketListResult {
@@ -76,6 +78,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
+    'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
+    'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
+    'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
   }
   interface TypertRemoteNamespaceMap {
     pluginMarket: TypertRemoteNamespace<'pluginMarket'>
@@ -100,6 +105,9 @@ interface MarketRemote extends TypertClientRemote {
     installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
+    star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
+    starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
+    setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
   }
 }
 
@@ -138,6 +146,9 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('installPlugin', ['owner', 'repo', 'subdir']),
   desc('update', ['owner', 'repo', 'subdir']),
   desc('uninstall', ['name']),
+  desc('star', ['owner', 'repo']),
+  desc('starredList', []),
+  desc('setToken', ['token']),
 ]
 
 // ── locales ─────────────────────────────────────────────────────────────
@@ -169,6 +180,8 @@ const css = `
 .zat-search{flex:1;min-width:160px;display:flex;align-items:center;gap:6px;background:var(--color-bg2,#181d28);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:6px 10px}
 .zat-search input{flex:1;background:transparent;border:none;outline:none;color:var(--color-fg1,#e6e9ef);font-size:13px}
 .zat-search input::placeholder{color:var(--color-fg3,#5d6676)}
+.zat-token{flex:1;min-width:200px;background:var(--color-bg2,#181d28);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--color-fg1,#e6e9ef);outline:none}
+.zat-token:focus{border-color:rgba(93,140,255,.5)}
 .zat-btn{background:var(--color-bg2,#232a3a);color:var(--color-fg2,#dbe2ee);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:5px 12px;font-size:12.5px;cursor:pointer;white-space:nowrap;transition:background .15s;text-decoration:none;display:inline-flex;align-items:center}
 .zat-btn:hover{background:var(--color-bg3,#2e3750)}
 .zat-btn.zat-primary{background:linear-gradient(90deg,#3d6bff,#7a4dff);border:none;color:#fff;font-weight:600}
@@ -196,7 +209,9 @@ const css = `
 .zat-owner{font-size:11px;color:var(--color-fg3,#7c8698);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .zat-desc{font-size:11.5px;color:var(--color-fg2,#a8b2c4);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:34px}
 .zat-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--color-fg3,#7c8698);margin-top:auto;flex-wrap:wrap}
-.zat-star{color:#f5b942;font-weight:600}
+.zat-star{color:#f5b942;font-weight:600;cursor:pointer;user-select:none}
+.zat-star:hover{filter:brightness(1.25)}
+.zat-star.zat-staroff{color:#8b94a5}
 .zat-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .zat-cardbtn{margin-top:8px;padding:6px 0;border-radius:8px;border:none;font-size:12px;font-weight:600;cursor:pointer;text-align:center;transition:filter .15s}
 .zat-cardbtn.zat-install{background:linear-gradient(90deg,#3d6bff,#7a4dff);color:#fff}
@@ -306,10 +321,83 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
+  const [hasToken, setHasToken] = useState<boolean | null>(null)
+  const [tokenInput, setTokenInput] = useState('')
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const starredSetRef = useRef<Set<string> | null>(null)
 
   const t = (zhText: string, enText: string): string => (zh ? zhText : enText)
+
+  /** Stamp `starred` onto a list from the cached starred-set (filled async). */
+  function applyStars(list: MarketItem[]): MarketItem[] {
+    const set = starredSetRef.current
+    if (!set) return list
+    return list.map((it) => ({ ...it, starred: set.has(it.fullName.toLowerCase()) }))
+  }
+
+  /** Fetch the current user's starred repos and restamp all visible cards. */
+  function syncStars(): void {
+    void pm.starredList().then((res) => {
+      if (!res.ok || !res.value.ok) { setHasToken(false); return }
+      const list = Array.isArray(res.value.starred) ? (res.value.starred as string[]) : []
+      const set = new Set(list)
+      starredSetRef.current = set
+      setHasToken(true)
+      setItems((prev) => (prev ? prev.map((it) => ({ ...it, starred: set.has(it.fullName.toLowerCase()) })) : prev))
+    }).catch(() => { setHasToken(false) })
+  }
+
+  /** One-click star / unstar; falls back to the repo page when no credential. */
+  function onStar(item: MarketItem): void {
+    void pm.star(item.owner, item.name).then((res) => {
+      const value = res.ok ? res.value : null
+      if (res.ok && value && value.ok && typeof value.starred === 'boolean') {
+        const key = item.fullName.toLowerCase()
+        if (value.starred) starredSetRef.current?.add(key)
+        else starredSetRef.current?.delete(key)
+        setItems((prev) => (prev ? prev.map((it) => (it.fullName === item.fullName
+          ? { ...it, starred: value.starred, stars: Math.max(0, it.stars + (value.starred ? 1 : -1)) }
+          : it)) : prev))
+        setNotice(String(value.message || ''))
+      } else if (res.ok && value && value.needToken) {
+        setNotice(String(value.message || t('需要 GitHub 凭据才能一键星标', 'A GitHub credential is required to star')))
+        const u = String((value as { url?: string }).url || item.htmlUrl || `https://github.com/${item.fullName}`)
+        window.open(u, '_blank', 'noopener')
+      } else {
+        setNotice(res.ok ? String(value?.message || t('星标失败', 'Star failed')) : res.error.message)
+      }
+    }).catch((err: unknown) => { setNotice(String((err as { message?: string })?.message || err)) })
+  }
+
+  function saveToken(): void {
+    const tok = tokenInput.trim()
+    if (!tok) { setNotice(t('先粘贴一个 Token 再保存', 'Paste a token first')); return }
+    void pm.setToken(tok).then((res) => {
+      if (res.ok && res.value.ok) {
+        setHasToken(Boolean(res.value.hasToken))
+        setTokenInput('')
+        setNotice(String(res.value.message || ''))
+        starredSetRef.current = null
+        syncStars()
+      } else {
+        setNotice(res.ok ? String(res.value.message || '') : res.error.message)
+      }
+    }).catch((err: unknown) => setNotice(String((err as { message?: string })?.message || err)))
+  }
+
+  function clearToken(): void {
+    void pm.setToken('').then((res) => {
+      if (res.ok && res.value.ok) {
+        setHasToken(false)
+        starredSetRef.current = null
+        setItems((prev) => (prev ? prev.map((it) => ({ ...it, starred: false })) : prev))
+        setNotice(String(res.value.message || ''))
+      } else {
+        setNotice(res.ok ? String(res.value.message || '') : res.error.message)
+      }
+    }).catch((err: unknown) => setNotice(String((err as { message?: string })?.message || err)))
+  }
 
   useEffect(() => {
     const off = locale.subscribe(() => {
@@ -337,7 +425,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         return
       }
       const data = res.value
-      setItems((prev) => (append && prev ? [...prev, ...data.items] : data.items))
+      setItems((prev) => (append && prev ? [...prev, ...applyStars(data.items)] : applyStars(data.items)))
       setTotal(data.total || 0)
       setPage(p)
       requestZh(data.items)
@@ -390,6 +478,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || '') })
       }
     }).catch(() => { /* best effort */ })
+    syncStars()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -620,6 +709,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
           <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
           <span className="zat-lgi"><i style={{ background: '#f0a94b' }} />{t('已装·未启用', 'Installed, disabled')}</span>
+          <span className="zat-lgi"><i style={{ background: '#f5b942' }} />★ {t('已星标(点击切换)', 'Starred (click to toggle)')}</span>
         </div>
       )}
       {notice && <div className="zat-notice">{notice}</div>}
@@ -641,7 +731,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {items && items.length === 0 && <div className="zat-status">{t('没有找到插件', 'No plugins found')}</div>}
         {items && items.length > 0 && filtered.length === 0 && <div className="zat-status">{t('当前筛选条件下没有插件', 'No plugins match filters')}</div>}
         {filtered.map((it) => (
-          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} onOpen={openDetail} onAction={cardAction} />
+          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} onOpen={openDetail} onAction={cardAction} onStar={onStar} />
         ))}
         {loading && <div className="zat-loading">{t('正在加载…', 'Loading…')}</div>}
       </div>
@@ -651,6 +741,19 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           {t('已加载 ', 'Loaded ')}{items ? items.length : 0} / {total}{t(' · 滚动到底自动加载 · GitHub 搜索上限 1000', ' · scroll to load more · GitHub cap 1000')}
         </span>
         {page * 100 < total && !loading && <button className="zat-btn" onClick={() => load(page + 1, sort, query, category, true)}>{t('加载更多 ↓', 'Load more ↓')}</button>}
+      </div>
+      <div className="zat-legend">
+        <span className="zat-lghead">GitHub Token:</span>
+        <input
+          className="zat-token"
+          type="password"
+          placeholder={t('可选,用于一键星标;只保存在本机 profile 目录', 'Optional, for one-click star; stored only in your local profile')}
+          value={tokenInput}
+          onChange={(e) => setTokenInput(e.currentTarget.value)}
+        />
+        <button className="zat-btn" onClick={saveToken}>{t('保存', 'Save')}</button>
+        <button className="zat-btn" onClick={clearToken}>{t('清除', 'Clear')}</button>
+        {hasToken === true && <span className="zat-count">✓ {t('已配置,卡片上的★即当前账号的星标', 'Configured — ★ shows your account stars')}</span>}
       </div>
     </div>
   )
@@ -663,9 +766,10 @@ interface MarketCardProps {
   installing: boolean
   onOpen: (item: MarketItem) => void
   onAction: (item: MarketItem) => void
+  onStar: (item: MarketItem) => void
 }
 
-function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardProps) {
+function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
@@ -707,7 +811,13 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
         <div className="zat-owner">{item.fullName}</div>
         <div className="zat-desc">{desc}</div>
         <div className="zat-meta">
-          <span className="zat-star">★ {formatStars(item.stars)}</span>
+          <span
+            className={'zat-star' + (item.starred ? '' : ' zat-staroff')}
+            title={item.starred ? t('已星标,点击取消', 'Starred — click to unstar') : t('点击星标', 'Click to star')}
+            onClick={(e) => { e.stopPropagation(); onStar(item) }}
+          >
+            {item.starred ? '★' : '☆'} {formatStars(item.stars)}
+          </span>
           {item.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[item.language] || '#8b949e' }} /> {item.language}</span>}
         </div>
         <button className={`zat-cardbtn ${btnClass}`} onClick={(e) => { e.stopPropagation(); onAction(item) }} disabled={!!installing}>{btnText}</button>

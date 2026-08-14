@@ -41,7 +41,7 @@ interface SubprocessFace {
   spawn(opts: {
     argv: string[]
     cwd: string
-    stdio: { stdin: 'ignore'; stdout: { maxBytes: number }; stderr: { maxBytes: number } }
+    stdio: { stdin: 'ignore' | { data: string }; stdout: { maxBytes: number }; stderr: { maxBytes: number } }
     graceMs: number
   }): SpawnHandle
 }
@@ -1059,6 +1059,170 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.writeProfile(after)
       }
       return { ok: true, message: 'removed ' + n }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  // ── one-click star ─────────────────────────────────────────────────────
+
+  private tokenValue: string | null = null
+  private tokenResolved = false
+  private tokenPromise: Promise<string | null> | null = null
+
+  /**
+   * GitHub REST call with an optional Bearer token. Uses curl with argv
+   * (no shell interpolation), so the token can never break quoting or leak
+   * into a log line.
+   */
+  private async ghApi(method: string, path: string, token?: string): Promise<{ status: number; body: string; error?: string }> {
+    const proxy = await this.loadProxy()
+    const proxyArgs = proxy ? ['--proxy', proxy] : []
+    let curl = 'curl'
+    try { curl = await this.subprocess.resolveExecutable('curl') } catch { curl = '' }
+    if (!curl) return { status: 0, body: '', error: 'curl not available' }
+    const argv = [curl, ...proxyArgs, '-s', '-L', '--max-time', '30', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.3.1', '-H', 'Accept: application/vnd.github+json', '-X', method]
+    if (token) argv.push('-H', `Authorization: Bearer ${token}`)
+    argv.push('https://api.github.com' + path)
+    const handle = this.subprocess.spawn({
+      argv,
+      cwd: this.shellCwd(),
+      stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
+      graceMs: 60000,
+    })
+    const outcome = await handle.done
+    let stdout = ''
+    let stderr = ''
+    if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
+    if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
+    if (outcome.exitCode === 0) {
+      const lines = String(stdout).trimEnd().split('\n')
+      const status = Number(lines.pop())
+      if (Number.isFinite(status) && status > 0) return { status, body: lines.join('\n') }
+      return { status: 200, body: lines.join('\n') }
+    }
+    if (stderr.trim()) return { status: 0, body: '', error: stderr.trim().slice(0, 200) }
+    return { status: 0, body: '', error: 'curl failed' }
+  }
+
+  /** Ask the local git credential helper for the github.com password/token. */
+  private async gitCredentialToken(): Promise<string | null> {
+    let git = 'git'
+    try { git = await this.subprocess.resolveExecutable('git') } catch { return null }
+    try {
+      const handle = this.subprocess.spawn({
+        argv: [git, 'credential', 'fill'],
+        cwd: this.shellCwd(),
+        stdio: { stdin: { data: 'protocol=https\nhost=github.com\n\n' }, stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 16 * 1024 } },
+        graceMs: 30000,
+      })
+      const outcome = await handle.done
+      if (outcome.exitCode !== 0) return null
+      const out = handle.collected?.stdout ? handle.collected.stdout.readFrom(0).text || '' : ''
+      const line = out.split(/\r?\n/).find((l) => l.startsWith('password='))
+      const pw = line ? line.slice('password='.length).trim() : ''
+      return pw || null
+    } catch { return null }
+  }
+
+  /** Resolve a GitHub token: env → local profile config → git credential helper. Cached. */
+  private resolveToken(): Promise<string | null> {
+    if (this.tokenResolved) return Promise.resolve(this.tokenValue)
+    if (this.tokenPromise) return this.tokenPromise
+    this.tokenPromise = (async () => {
+      try {
+        const envTok = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+        if (envTok && envTok.trim()) return envTok.trim()
+        try {
+          const dir = await this.getProfileDir()
+          const cfg = JSON.parse(readFileSync(join(dir, 'zat-market.json'), 'utf8')) as JsonObject
+          if (typeof cfg.githubToken === 'string' && cfg.githubToken.trim()) return cfg.githubToken.trim()
+        } catch { /* no local config */ }
+        return await this.gitCredentialToken()
+      } catch { return null }
+    })().then((t) => {
+      this.tokenValue = t
+      this.tokenResolved = true
+      return t
+    })
+    return this.tokenPromise
+  }
+
+  @Remote('star')
+  async starToggle(owner: string, repo: string): Promise<JsonObject> {
+    try {
+      const o = safeSegment(owner)
+      const r = safeSegment(repo)
+      if (!o || !r) return { ok: false, message: 'invalid repository name' }
+      const token = await this.resolveToken()
+      if (!token) {
+        return {
+          ok: false,
+          needToken: true,
+          url: `https://github.com/${o}/${r}`,
+          message: '一键星标需要 GitHub 凭据:本机没有可用的 git 凭据,也没有配置 Token。已在浏览器打开仓库页面,可以手动点星;或在市场底部填一个 GitHub Token 后再试。',
+        }
+      }
+      const cur = await this.ghApi('GET', `/user/starred/${o}/${r}`, token)
+      if (cur.status !== 204 && cur.status !== 404) {
+        if (cur.status === 401 || cur.status === 403) return { ok: false, message: 'GitHub 拒绝了这个凭据(401/403)。请在市场底部重新填一个有效的 GitHub Token。' }
+        return { ok: false, message: `GitHub API 错误:${cur.status}${cur.error ? ' ' + cur.error : ''}` }
+      }
+      const starred = cur.status === 204
+      const act = await this.ghApi(starred ? 'DELETE' : 'PUT', `/user/starred/${o}/${r}`, token)
+      if (act.status === 204) return { ok: true, starred: !starred, message: starred ? `已取消星标 ${o}/${r}` : `已星标 ⭐ ${o}/${r}` }
+      if (act.status === 401 || act.status === 403) return { ok: false, message: 'GitHub 拒绝了这个凭据(401/403)。请在市场底部重新填一个有效的 GitHub Token。' }
+      return { ok: false, message: `星标操作失败:${act.status}${act.error ? ' ' + act.error : ''}` }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  @Remote('starredList')
+  async starredList(): Promise<JsonObject> {
+    try {
+      const token = await this.resolveToken()
+      if (!token) return { ok: false, message: 'no github token available' }
+      const names: string[] = []
+      for (let page = 1; page <= 20; page++) {
+        const r = await this.ghApi('GET', `/user/starred?per_page=100&page=${page}`, token)
+        if (r.status !== 200) {
+          if (page === 1) {
+            if (r.status === 401 || r.status === 403) return { ok: false, message: 'GitHub 拒绝了这个凭据。请在市场底部重新填一个有效的 GitHub Token。' }
+            return { ok: false, message: `GitHub API 错误:${r.status}` }
+          }
+          break
+        }
+        let arr: unknown[] = []
+        try { arr = JSON.parse(r.body) as unknown[] } catch { break }
+        const list = Array.isArray(arr) ? arr : []
+        for (const it of list) {
+          const f = (it as { full_name?: unknown })?.full_name
+          if (typeof f === 'string' && f) names.push(f.toLowerCase())
+        }
+        if (list.length < 100) break
+      }
+      return { ok: true, starred: names }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  @Remote('setToken')
+  async setToken(token: string): Promise<JsonObject> {
+    try {
+      const t = String(token || '').trim()
+      if (t.length > 200) return { ok: false, message: 'token too long' }
+      const dir = await this.getProfileDir()
+      const cfgPath = join(dir, 'zat-market.json')
+      let cfg: JsonObject = {}
+      try { cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as JsonObject } catch { /* new file */ }
+      if (t) { cfg.githubToken = t } else { delete cfg.githubToken }
+      await this.writeFileText(cfgPath, JSON.stringify(cfg, null, 2))
+      this.tokenValue = null
+      this.tokenResolved = false
+      this.tokenPromise = null
+      return { ok: true, hasToken: Boolean(t), message: t ? 'Token 已保存(只存在本机 profile 目录的 zat-market.json,不会上传)' : 'Token 已清除' }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
