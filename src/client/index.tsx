@@ -492,8 +492,8 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   const filtered = items ? items.filter((it) => {
-    if (instFilter === 'installed' && !it.installed) return false
-    if (instFilter === 'uninstalled' && it.installed) return false
+    if (instFilter === 'installed' && !(it.installed || it.disabled)) return false
+    if (instFilter === 'uninstalled' && (it.installed || it.disabled)) return false
     return true
   }) : []
 
