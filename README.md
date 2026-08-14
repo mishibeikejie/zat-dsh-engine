@@ -66,22 +66,6 @@ Re-running `add` updates to the latest commit. The marketplace also detects its 
 dsh plugin --profile web remove zat-dsh-engine
 ```
 
-## For plugin authors — how to get listed
-
-The market discovers plugins **automatically** from GitHub. To make your plugin appear:
-
-1. Open your plugin repository on GitHub.
-2. Click the ⚙ gear next to **About**, then add topics.
-3. Add the **required** topic:
-   - `dsh-plugin` ← the marketplace catalog key
-4. Also add these **discovery** topics so users searching GitHub find you:
-   - `dsh`
-   - `deepseek-harness`
-   - `deepseek`
-5. Done — your plugin appears in the market within minutes (check the **Recently updated** sort).
-
-The market shows your repository name, stars, description and README automatically. Chinese users see a machine-translated intro; you can provide your own by adding a `README.zh.md`.
-
 ## FAQ
 
 **The market shows at most 1000 plugins in the All view.** GitHub's search API caps any query at 1000 results. Search and category filters reach every plugin regardless.

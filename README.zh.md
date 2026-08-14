@@ -66,22 +66,6 @@ dsh plugin --profile web add github:mishibeikejie/zat-dsh-engine
 dsh plugin --profile web remove zat-dsh-engine
 ```
 
-## 给插件作者的说明 — 怎么让你的插件进市场
-
-市场**全自动**从 GitHub 发现插件。让你的插件上架:
-
-1. 打开你的插件仓库的 GitHub 页面。
-2. 点 About 右边的 ⚙ 齿轮,添加 Topics 标签。
-3. 添加**必需**标签:
-   - `dsh-plugin` ← 进入插件市场的通行证
-4. 再加上这些**曝光**标签,让搜 GitHub 的用户也能找到你:
-   - `dsh`
-   - `deepseek-harness`
-   - `deepseek`
-5. 完成 — 几分钟后你的插件就出现在市场里(切到「最新更新」排序立刻可见)。
-
-市场会自动展示你的仓库名、star 数、简介和 README。中文用户会看到机器翻译的简介;你也可以自己加一个 `README.zh.md` 提供官方中文简介。
-
 ## 常见问题
 
 **「全部」视图最多显示 1000 个插件。** 这是 GitHub 搜索 API 对单次查询的硬上限。用搜索框或分类筛选可以找到任何一个插件,不受此限。
