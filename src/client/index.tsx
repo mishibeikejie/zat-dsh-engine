@@ -67,13 +67,20 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/installed': () => Promise<RemoteResult<MarketJson>>
     'pluginMarket/detail': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean }>>
     'pluginMarket/selfupdate': (doUpdate: boolean) => Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
-    'pluginMarket/installPlugin': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null }>>
-    'pluginMarket/update': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
+    'pluginMarket/subpackages': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
+    'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
+    'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
   }
   interface TypertRemoteNamespaceMap {
     pluginMarket: TypertRemoteNamespace<'pluginMarket'>
   }
+}
+
+interface MarketSubpackage {
+  dir: string
+  name: string
+  version: string
 }
 
 interface MarketRemote extends TypertClientRemote {
@@ -84,8 +91,9 @@ interface MarketRemote extends TypertClientRemote {
     installed(): Promise<RemoteResult<MarketJson>>
     detail(owner: string, repo: string): Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean }>>
     selfupdate(doUpdate: boolean): Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
-    installPlugin(owner: string, repo: string): Promise<RemoteResult<MarketJson & { packageName?: string | null }>>
-    update(owner: string, repo: string): Promise<RemoteResult<MarketJson & { version?: string }>>
+    subpackages(owner: string, repo: string): Promise<RemoteResult<MarketJson & { kind?: string; packages?: MarketSubpackage[] }>>
+    installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
+    update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
   }
 }
@@ -121,8 +129,9 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('installed', []),
   desc('detail', ['owner', 'repo']),
   desc('selfupdate', ['doUpdate']),
-  desc('installPlugin', ['owner', 'repo']),
-  desc('update', ['owner', 'repo']),
+  desc('subpackages', ['owner', 'repo']),
+  desc('installPlugin', ['owner', 'repo', 'subdir']),
+  desc('update', ['owner', 'repo', 'subdir']),
   desc('uninstall', ['name']),
 ]
 
@@ -203,6 +212,11 @@ const css = `
 .zat-notice{color:#fbbf24;font-size:12.5px;padding:4px 0}
 .zat-zhlabel{color:#9fc1ff;font-size:11px;font-weight:600;margin-right:4px}
 .zat-monobadge{background:#3a2a1a;color:#fbbf24;border:1px solid rgba(251,191,36,.35);border-radius:8px;padding:6px 12px;font-size:12px;display:inline-block}
+.zat-subchoices{background:var(--color-bg2,#151a24);border:1px solid rgba(251,191,36,.35);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.zat-subchoices-title{font-size:12.5px;color:#fbbf24;font-weight:600}
+.zat-subrow{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.zat-subname{font-size:12.5px;color:var(--color-fg1,#eef1f7)}
+.zat-subname small{color:var(--color-fg3,#7c8698);margin-left:6px}
 `
 
 function injectCss(): () => void {
@@ -272,6 +286,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
   const [notice, setNotice] = useState('')
   const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string } | null>(null)
+  const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -367,9 +382,15 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function doInstall(item: MarketItem): void {
     setInstalling(item.fullName)
-    void pm.installPlugin(item.owner, item.name).then((res) => {
+    void pm.installPlugin(item.owner, item.name, '').then((res) => {
       setInstalling('')
       const value = res.ok ? res.value : null
+      // Monorepo: the host returns the bundled sub-plugins; offer them.
+      if (res.ok && value && value.kind === 'multi' && Array.isArray(value.packages) && value.packages.length > 0) {
+        setSubChoices({ owner: item.owner, repo: item.name, packages: value.packages })
+        setNotice(String(value.message || ''))
+        return
+      }
       setNotice(res.ok ? String(value?.message || (value?.ok ? t('已安装,重启 dsh 生效', 'Installed — restart dsh to activate') : t('安装失败', 'Install failed'))) : res.error.message)
       if (res.ok && value?.ok) refreshItem(item.fullName, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
     }).catch((err: unknown) => {
@@ -378,9 +399,25 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     })
   }
 
+  function doInstallSub(choice: { owner: string; repo: string; packages: MarketSubpackage[] }, sub: MarketSubpackage): void {
+    setInstalling(choice.owner + '/' + choice.repo + '/' + sub.dir)
+    void pm.installPlugin(choice.owner, choice.repo, sub.dir).then((res) => {
+      setInstalling('')
+      const value = res.ok ? res.value : null
+      setNotice(res.ok ? String(value?.message || (value?.ok ? t('已安装,重启 dsh 生效', 'Installed — restart dsh to activate') : t('安装失败', 'Install failed'))) : res.error.message)
+      if (res.ok && value?.ok) {
+        setSubChoices(null)
+        refreshItem(choice.owner + '/' + choice.repo, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
+      }
+    }).catch((err: unknown) => {
+      setInstalling('')
+      setNotice(String((err as { message?: string })?.message || err))
+    })
+  }
+
   function doUpdate(item: MarketItem): void {
     setInstalling(item.fullName)
-    void pm.update(item.owner, item.name).then((res) => {
+    void pm.update(item.owner, item.name, '').then((res) => {
       setInstalling('')
       const value = res.ok ? res.value : null
       setNotice(res.ok ? String(value?.message || '') : res.error.message)
@@ -513,6 +550,18 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
       </div>
+      {subChoices && (
+        <div className="zat-subchoices">
+          <div className="zat-subchoices-title">{t('这是多插件仓库,请选择要安装的子插件:', 'Multi-plugin repository — choose a sub-package to install:')}</div>
+          {subChoices.packages.map((sub) => (
+            <div key={sub.dir} className="zat-subrow">
+              <span className="zat-subname">{sub.name}<small>({sub.dir}{sub.version ? ` v${sub.version}` : ''})</small></span>
+              <button className="zat-btn zat-primary" onClick={() => doInstallSub(subChoices, sub)} disabled={!!installing}>{installing ? t('处理中…', '...') : t('安装', 'Install')}</button>
+            </div>
+          ))}
+          <button className="zat-btn" onClick={() => setSubChoices(null)}>{t('取消', 'Cancel')}</button>
+        </div>
+      )}
       <div className="zat-grid" onScroll={onScroll}>
         {error && <div className="zat-status zat-error">⚠ {error}</div>}
         {!items && !error && <div className="zat-status">{t('正在加载插件列表…', 'Loading plugins…')}</div>}

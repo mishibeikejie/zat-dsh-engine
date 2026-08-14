@@ -14,7 +14,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
+
+/** Host platform facts (this package is a plain Node ESM module). */
+const IS_WIN = process.platform === 'win32'
 
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
@@ -118,7 +123,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.1.3'
+const SELF_VERSION = '0.2.0'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -137,13 +142,6 @@ const CATEGORY_QUERY: Record<string, string> = {
 
 function encodeQueryPart(s: string): string {
   return s.replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\s+/g, '+')
-}
-
-function toBase64(str: string): string {
-  const bytes = new TextEncoder().encode(str)
-  let binary = ''
-  for (const b of bytes) binary += String.fromCharCode(b)
-  return btoa(binary)
 }
 
 export class ZatMarketGateway extends TypertRemoteService {
@@ -175,12 +173,25 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   // ── helpers ────────────────────────────────────────────────────────────
 
-  private async runPowershell(command: string, cwd?: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
-    let exe = 'powershell.exe'
-    try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
+  private shellCwd(): string {
+    return IS_WIN ? 'C:\\' : '/'
+  }
+
+  /** Run one shell command line on the host platform. */
+  private async runShell(command: string, cwd?: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+    let argv: string[]
+    if (IS_WIN) {
+      let exe = 'powershell.exe'
+      try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
+      argv = [exe, '-NoProfile', '-NonInteractive', '-Command', command]
+    } else {
+      let sh = '/bin/sh'
+      try { sh = await this.subprocess.resolveExecutable('sh') } catch { /* keep fallback */ }
+      argv = [sh, '-c', command]
+    }
     const handle = this.subprocess.spawn({
-      argv: [exe, '-NoProfile', '-NonInteractive', '-Command', command],
-      cwd: cwd || 'C:\\',
+      argv,
+      cwd: cwd || this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 8 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
       graceMs: 120000,
     })
@@ -192,78 +203,78 @@ export class ZatMarketGateway extends TypertRemoteService {
     return { outcome, stdout, stderr }
   }
 
-  /** Write a file through PowerShell so the fs workspace-write sandbox cannot fence it. */
+  /** Write a file directly through node:fs (this package is trusted Node code). */
   private async writeFileText(path: string, content: string): Promise<void> {
-    const b64 = toBase64(content)
-    const ps = `[IO.File]::WriteAllText("${path.replace(/"/g, '`"')}", [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${b64}")), (New-Object System.Text.UTF8Encoding($False)))`
-    const r = await this.runPowershell(ps, 'C:\\')
-    if (r.outcome.exitCode !== 0) throw new Error((r.stderr || r.stdout || 'write failed').slice(0, 500))
+    writeFileSync(path, content, 'utf8')
   }
 
   /**
-   * Run a pnpm command with the user's system proxy inherited, then retry
-   * through the gh-proxy mirror when the direct attempt fails.
-   *
-   * git/pnpm do not read the Windows system proxy on their own; without the
-   * first step, `pnpm add github:...` fails even when the user's browser
-   * reaches GitHub through a VPN/proxy. The second step covers users with
-   * NO proxy at all (e.g. mainland China without a VPN): the git smart-HTTP
-   * request to github.com fails, so the retry rewrites github.com URLs onto
-   * gh-proxy.com through GIT_CONFIG_* environment variables — a per-process
-   * override that touches no global git configuration.
+   * Run a pnpm command with the user's proxy inherited (Windows reads the
+   * system proxy from the registry and exports it; Linux inherits HTTP_PROXY
+   * from the environment naturally), then retry through the gh-proxy mirror
+   * when the direct attempt fails. The mirror retry rewrites github.com URLs
+   * onto gh-proxy.com through per-process GIT_CONFIG_* variables, touching
+   * no global git configuration.
    */
   private async pnpmShell(command: string, dir: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
-    const proxySetup = [
-      "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue;",
-      'if($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer){',
-      '  $s=\'\'+$p.ProxyServer;',
-      '  if($s -notmatch \'^https?://\'){ $s=\'http://\'+$s };',
-      '  $env:HTTPS_PROXY=$s; $env:HTTP_PROXY=$s; $env:ALL_PROXY=$s;',
-      '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
-      '};',
-    ].join(' ')
+    if (IS_WIN) {
+      const proxySetup = [
+        "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue;",
+        'if($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer){',
+        '  $s=\'\'+$p.ProxyServer;',
+        '  if($s -notmatch \'^https?://\'){ $s=\'http://\'+$s };',
+        '  $env:HTTPS_PROXY=$s; $env:HTTP_PROXY=$s; $env:ALL_PROXY=$s;',
+        '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
+        '};',
+      ].join(' ')
+      const mirrorRetry = [
+        command + ';',
+        'if ($LASTEXITCODE -ne 0) {',
+        '  $env:GIT_CONFIG_COUNT=1;',
+        "  $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
+        "  $env:GIT_CONFIG_VALUE_0='https://github.com/';",
+        '  ' + command + ';',
+        '}',
+      ].join(' ')
+      return this.runShell(proxySetup + ' ' + mirrorRetry, dir)
+    }
     const mirrorRetry = [
-      command + ';',
-      'if ($LASTEXITCODE -ne 0) {',
-      '  $env:GIT_CONFIG_COUNT=1;',
-      "  $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
-      "  $env:GIT_CONFIG_VALUE_0='https://github.com/';",
+      command + ' || {',
+      "  export GIT_CONFIG_COUNT=1;",
+      "  export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
+      "  export GIT_CONFIG_VALUE_0='https://github.com/';",
       '  ' + command + ';',
       '}',
     ].join(' ')
-    return this.runPowershell(proxySetup + ' ' + mirrorRetry, dir)
+    return this.runShell(mirrorRetry, dir)
   }
 
   private async getHome(): Promise<string> {
     if (this.home) return this.home
-    const r = await this.runPowershell('$e=[Environment]::GetEnvironmentVariable("DSH_HOME","Process"); if(-not $e){ $e=Join-Path ([Environment]::GetFolderPath("UserProfile")) ".dsh" }; Write-Output $e')
-    this.home = (r.stdout || '').trim() || null
-    if (!this.home) throw new Error('cannot resolve DSH home')
+    const env = process.env.DSH_HOME
+    const base = env && env.trim() ? env.trim() : join(process.env.HOME || process.env.USERPROFILE || (IS_WIN ? 'C:\\Users' : '/root'), '.dsh')
+    this.home = base
     return this.home
   }
 
   private async getProfileName(): Promise<string> {
     if (this.profileNameValue) return this.profileNameValue
-    try {
-      const r = await this.runPowershell('$e=[Environment]::GetEnvironmentVariable("DSH_PROFILE","Process"); Write-Output $e')
-      const v = (r.stdout || '').trim()
-      if (v) { this.profileNameValue = v; return v }
-    } catch { /* fall through to scan */ }
+    const envProfile = process.env.DSH_PROFILE
+    if (envProfile && envProfile.trim()) {
+      this.profileNameValue = envProfile.trim()
+      return this.profileNameValue
+    }
     const h = await this.getHome()
-    const dir = h + '\\profiles'
+    const dir = join(h, 'profiles')
     let names: string[] = []
-    try {
-      const dirTarget = await this.fs.resolve(dir)
-      const entries = await this.fs.listDir(dirTarget)
-      names = entries.map((e) => e.name)
-    } catch { names = [] }
+    try { names = readdirSync(dir) } catch { names = [] }
     for (const n of names) {
       if (n === 'node_modules' || n === 'plugins') continue
       try {
-        const pkgTarget = await this.fs.resolve(dir + '\\' + n + '\\package.json')
-        await this.fs.readText(pkgTarget)
-        this.profileNameValue = n
-        break
+        if (existsSync(join(dir, n, 'package.json'))) {
+          this.profileNameValue = n
+          break
+        }
       } catch { /* next candidate */ }
     }
     if (!this.profileNameValue) throw new Error('no dsh profile found')
@@ -274,7 +285,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (this.profileDirValue) return this.profileDirValue
     const h = await this.getHome()
     const p = await this.getProfileName()
-    this.profileDirValue = h + '\\profiles\\' + p
+    this.profileDirValue = join(h, 'profiles', p)
     return this.profileDirValue
   }
 
@@ -283,7 +294,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     try { curl = await this.subprocess.resolveExecutable('curl') } catch { /* keep fallback */ }
     const handle = this.subprocess.spawn({
       argv: [curl, '-s', '-L', '--max-time', '30', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.1.0', url],
-      cwd: 'C:\\',
+      cwd: this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
       graceMs: 60000,
     })
@@ -316,21 +327,20 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   private async readProfile(): Promise<JsonObject> {
     const dir = await this.getProfileDir()
-    const target = await this.fs.resolve(dir + '\\package.json')
-    return JSON.parse(await this.fs.readText(target)) as JsonObject
+    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
   }
 
   private async writeProfile(obj: JsonObject): Promise<void> {
     const dir = await this.getProfileDir()
-    await this.writeFileText(dir + '\\package.json', JSON.stringify(obj, null, 2))
+    await this.writeFileText(join(dir, 'package.json'), JSON.stringify(obj, null, 2))
   }
 
-  private installedMap(p: JsonObject): Record<string, { name: string; spec: string; owner?: string; repo?: string }> {
-    const map: Record<string, { name: string; spec: string; owner?: string; repo?: string }> = {}
+  private installedMap(p: JsonObject): Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string }> {
+    const map: Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string }> = {}
     const deps = (p.dependencies || {}) as Record<string, string>
     for (const key of Object.keys(deps)) {
       const spec = String(deps[key] || '')
-      const rec = { name: key, spec }
+      const rec: { name: string; spec: string; owner?: string; repo?: string; subdir?: string } = { name: key, spec }
       map[key.toLowerCase()] = rec
       const bare = key.replace(/^@[\w.-]+\//, '')
       if (!map[bare.toLowerCase()]) map[bare.toLowerCase()] = rec
@@ -338,6 +348,8 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (gitMatch) {
         rec.owner = gitMatch[1]
         rec.repo = gitMatch[2]
+        const pathMatch = spec.match(/#(?:[^&]*&)?path:([^&]+)/)
+        if (pathMatch) rec.subdir = decodeURIComponent(pathMatch[1]).replace(/^\/+/, '')
         map[(gitMatch[1] + '/' + gitMatch[2]).toLowerCase()] = rec
       }
     }
@@ -372,9 +384,8 @@ export class ZatMarketGateway extends TypertRemoteService {
     // Increments: the user's local cache written by earlier translations.
     try {
       const dir = await this.getProfileDir()
-      this.zhCacheFile = dir + '\\plugin-market-zh.json'
-      const target = await this.fs.resolve(this.zhCacheFile)
-      const raw = await this.fs.readText(target)
+      this.zhCacheFile = join(dir, 'plugin-market-zh.json')
+      const raw = readFileSync(this.zhCacheFile, 'utf8')
       const data = JSON.parse(String(raw).replace(/^\uFEFF/, '')) as Record<string, ZhEntry | string>
       for (const key of Object.keys(data)) {
         const v = data[key]
@@ -452,8 +463,9 @@ export class ZatMarketGateway extends TypertRemoteService {
     }
   }
 
-  private async remoteVersion(owner: string, repo: string): Promise<string | null> {
-    const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/package.json`)
+  private async remoteVersion(owner: string, repo: string, subdir?: string): Promise<string | null> {
+    const path = subdir ? `${subdir}/package.json` : 'package.json'
+    const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${path}`)
     if (r.status !== 200) return null
     try { return (JSON.parse(r.body) as { version?: string }).version || null } catch { return null }
   }
@@ -461,13 +473,12 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async localVersion(name: string): Promise<string | null> {
     try {
       const dir = await this.getProfileDir()
-      const t = await this.fs.resolve(dir + '\\node_modules\\' + name + '\\package.json')
-      return (JSON.parse(await this.fs.readText(t)) as { version?: string }).version || null
+      return (JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { version?: string }).version || null
     } catch { return null }
   }
 
-  private async addSpec(owner: string, repo: string): Promise<{ ok: boolean; packageName: string | null; message?: string }> {
-    const spec = 'github:' + owner + '/' + repo
+  private async addSpec(owner: string, repo: string, subdir?: string): Promise<{ ok: boolean; packageName: string | null; message?: string }> {
+    const spec = subdir ? `github:${owner}/${repo}#path:${subdir}` : 'github:' + owner + '/' + repo
     const dir = await this.getProfileDir()
     const r = await this.pnpmShell('pnpm add ' + spec, dir)
     if (r.outcome.exitCode !== 0) return { ok: false, packageName: null, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
@@ -482,8 +493,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const specVal = String(((after.dependencies || {}) as Record<string, string>)[name] || '')
       if (!specVal.toLowerCase().includes(owner.toLowerCase() + '/' + repo.toLowerCase())) continue
       try {
-        const t = await this.fs.resolve(dir + '\\node_modules\\' + name + '\\package.json')
-        const meta = JSON.parse(await this.fs.readText(t)) as { dsh?: { bundle?: { patch?: string } } }
+        const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
         if (meta.dsh?.bundle?.patch) { bundles.push(name); added = name }
       } catch { /* not a bundle */ }
     }
@@ -582,7 +592,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (seen[full]) continue
         seen[full] = true
         const local = await this.localVersion(entry.name)
-        const remote = await this.remoteVersion(entry.owner, entry.repo)
+        const remote = await this.remoteVersion(entry.owner, entry.repo, entry.subdir)
         map[full] = { local, remote, hasUpdate: !!(local && remote && local !== remote) }
       }
     } catch { /* empty map */ }
@@ -699,21 +709,65 @@ export class ZatMarketGateway extends TypertRemoteService {
     return { ok: true, message: 'updated to v' + (await this.remoteVersion(owner, repo)) + ' — restart dsh to activate' }
   }
 
-  @Remote('installPlugin')
-  async install(owner: string, repo: string): Promise<JsonObject> {
+  @Remote('subpackages')
+  async subpackages(owner: string, repo: string): Promise<JsonObject> {
     try {
       const o = String(owner || '')
       const r = String(repo || '')
-      // Monorepo guard: a repository whose root declares no package.json
-      // cannot be one-click installed (the real plugin lives in a subdir).
-      // Detect it before pnpm fetches, and tell the user how to proceed.
+      // Single package: the root manifest itself declares the bundle patch.
       const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
-      if (rootPkg.status !== 200) {
-        return { ok: false, message: `⚠ ${o}/${r} 是多插件仓库(根目录没有 package.json),无法一键安装。请到该仓库的 GitHub 页面查看各子插件的安装方式。` }
+      if (rootPkg.status === 200) {
+        try {
+          const meta = JSON.parse(rootPkg.body) as { name?: string; version?: string; dsh?: { bundle?: { patch?: string } } }
+          if (meta.dsh?.bundle?.patch) {
+            return { ok: true, kind: 'single', packages: [{ dir: '', name: meta.name || r, version: meta.version || '' }] }
+          }
+        } catch { /* fall through to subdir scan */ }
       }
-      const res = await this.addSpec(o, r)
+      // Monorepo: scan first-level subdirectories for dsh.bundle.patch packages.
+      const listing = await this.ghGet(`https://api.github.com/repos/${o}/${r}/contents/`)
+      if (listing.status !== 200) return { ok: false, kind: 'none', packages: [], message: 'cannot list repository contents' }
+      let entries: unknown[] = []
+      try { entries = JSON.parse(listing.body) as unknown[] } catch { /* bad listing */ }
+      if (!Array.isArray(entries)) return { ok: false, kind: 'none', packages: [], message: 'unexpected repository listing' }
+      const pkgs: Array<{ dir: string; name: string; version: string }> = []
+      for (const raw of entries) {
+        const entry = raw as { type?: string; name?: string }
+        if (!entry || entry.type !== 'dir' || !entry.name) continue
+        const subPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/${entry.name}/package.json`)
+        if (subPkg.status !== 200) continue
+        try {
+          const meta = JSON.parse(subPkg.body) as { name?: string; version?: string; dsh?: { bundle?: { patch?: string } } }
+          if (meta.dsh?.bundle?.patch) pkgs.push({ dir: entry.name, name: meta.name || entry.name, version: meta.version || '' })
+        } catch { /* not a bundle */ }
+      }
+      return { ok: true, kind: pkgs.length > 0 ? 'multi' : 'none', packages: pkgs }
+    } catch (err) {
+      return { ok: false, kind: 'none', packages: [], message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  @Remote('installPlugin')
+  async install(owner: string, repo: string, subdir: string): Promise<JsonObject> {
+    try {
+      const o = String(owner || '')
+      const r = String(repo || '')
+      const s = String(subdir || '').replace(/^\/+/, '')
+      // Monorepo guard: when no subdir was picked and the root declares no
+      // package.json, list the bundled sub-plugins for the UI to offer.
+      if (!s) {
+        const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
+        if (rootPkg.status !== 200) {
+          const sub = await this.subpackages(o, r)
+          if (sub.ok && sub.kind === 'multi' && Array.isArray(sub.packages) && sub.packages.length > 0) {
+            return { ok: false, kind: 'multi', packages: sub.packages, message: `${o}/${r} 是多插件仓库,请选择要安装的子插件。` }
+          }
+          return { ok: false, message: `⚠ ${o}/${r} 是多插件仓库(根目录没有 package.json),且未找到可安装的子插件。请到该仓库的 GitHub 页面查看安装方式。` }
+        }
+      }
+      const res = await this.addSpec(o, r, s || undefined)
       return res.ok
-        ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r} — restart dsh to activate` }
+        ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r}${s ? `#path:${s}` : ''} — restart dsh to activate` }
         : { ok: false, message: res.message }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -721,14 +775,15 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   @Remote('update')
-  async update(owner: string, repo: string): Promise<JsonObject> {
+  async update(owner: string, repo: string, subdir: string): Promise<JsonObject> {
     try {
       const o = String(owner || '')
       const r = String(repo || '')
-      const res = await this.addSpec(o, r)
-      const version = await this.remoteVersion(o, r)
+      const s = String(subdir || '').replace(/^\/+/, '')
+      const res = await this.addSpec(o, r, s || undefined)
+      const version = await this.remoteVersion(o, r, s || undefined)
       return res.ok
-        ? { ok: true, version, message: `updated github:${o}/${r} to v${version || '?'} — restart dsh to activate` }
+        ? { ok: true, version, message: `updated github:${o}/${r}${s ? `#path:${s}` : ''} to v${version || '?'} — restart dsh to activate` }
         : { ok: false, message: res.message }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
