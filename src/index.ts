@@ -94,6 +94,8 @@ interface PluginListItem {
   installedName: string | null
   installedVersion?: string | null
   isHarness?: boolean
+  /** Installed as a dependency but absent from dsh.profile.bundles (never loads). */
+  disabled?: boolean
   cover: string
 }
 
@@ -444,12 +446,18 @@ export class ZatMarketGateway extends TypertRemoteService {
     await this.writeFileText(join(dir, 'package.json'), JSON.stringify(obj, null, 2))
   }
 
-  private installedMap(p: JsonObject): Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string }> {
-    const map: Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string }> = {}
+  private installedMap(p: JsonObject): Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean }> {
+    const map: Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean }> = {}
     const deps = (p.dependencies || {}) as Record<string, string>
+    // Only bundle packages that are also listed in dsh.profile.bundles are
+    // actually loaded by the dsh loader; a dependency missing from bundles
+    // installs but never activates.
+    const bundles: string[] = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
+      ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
+      : []
     for (const key of Object.keys(deps)) {
       const spec = String(deps[key] || '')
-      const rec: { name: string; spec: string; owner?: string; repo?: string; subdir?: string } = { name: key, spec }
+      const rec: { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean } = { name: key, spec, enabled: bundles.includes(key) }
       map[key.toLowerCase()] = rec
       const bare = key.replace(/^@[\w.-]+\//, '')
       if (!map[bare.toLowerCase()]) map[bare.toLowerCase()] = rec
@@ -594,29 +602,50 @@ export class ZatMarketGateway extends TypertRemoteService {
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
     const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
-    if (pnpmResult.outcome.exitCode !== 0) return { ok: false, packageName: null, message: (pnpmResult.stderr || pnpmResult.stdout || 'pnpm failed').slice(0, 2000) }
+    if (pnpmResult.outcome.exitCode !== 0) {
+      const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
+      if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
+        return {
+          ok: false,
+          packageName: null,
+          message: `安装失败:该插件安装时需要运行构建脚本,被 pnpm 安全策略阻止。请手动编辑 ${join(dir, 'pnpm-workspace.yaml')},在 allowBuilds 列表中加入该插件名后重试,或改用官方命令: dsh plugin --profile <你的profile> add ${spec}`,
+        }
+      }
+      return { ok: false, packageName: null, message: errText.slice(0, 2000) || 'pnpm failed' }
+    }
     const after = await this.readProfile()
     const deps = Object.keys((after.dependencies || {}) as Record<string, string>)
     const bundles = Array.isArray((after.dsh as JsonObject | undefined)?.profile && ((after.dsh as JsonObject).profile as JsonObject).bundles)
       ? [...(((after.dsh as JsonObject).profile as JsonObject).bundles as string[])]
       : []
     let added: string | null = null
+    let matched = false
+    let missingBundle = false
     for (const name of deps) {
       if (bundles.includes(name)) continue
       const specVal = String(((after.dependencies || {}) as Record<string, string>)[name] || '')
       if (!specVal.toLowerCase().includes(o.toLowerCase() + '/' + repoName.toLowerCase())) continue
+      matched = true
       try {
         const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
         if (meta.dsh?.bundle?.patch) { bundles.push(name); added = name }
-      } catch { /* not a bundle */ }
+        else missingBundle = true
+      } catch { /* node_modules missing — treat as failure below */ }
     }
     if (added) {
       after.dsh = after.dsh || {}
       ;(after.dsh as JsonObject).profile = (after.dsh as JsonObject).profile || {}
       ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
       await this.writeProfile(after)
+      return { ok: true, packageName: added }
     }
-    return { ok: true, packageName: added }
+    if (missingBundle) {
+      return { ok: false, packageName: null, message: '安装完成,但该仓库没有声明 dsh.bundle,无法作为插件加载——它可能只是普通库或代码仓库,不是 dsh 插件。已作为普通依赖保留,重启也不会生效。' }
+    }
+    if (matched) {
+      return { ok: false, packageName: null, message: '安装记录已写入,但未能定位到已安装的包文件。请稍后重试,或检查 profile 的 node_modules。' }
+    }
+    return { ok: false, packageName: null, message: 'pnpm 报告成功,但依赖列表里没有出现该仓库。安装可能未完成,请重试。' }
   }
 
   // ── Remote methods ─────────────────────────────────────────────────────
@@ -675,10 +704,11 @@ export class ZatMarketGateway extends TypertRemoteService {
           updatedAt: it.updated_at || '',
           htmlUrl: it.html_url || '',
           homepage: it.homepage || '',
-          installed: isHarness || (rec ? true : false),
+          installed: isHarness || (rec ? rec.enabled : false),
           installedName: isHarness ? null : (rec ? rec.name : null),
           installedVersion: isHarness ? this.harnessVersion() : null,
           isHarness: isHarness || undefined,
+          disabled: rec && !rec.enabled ? true : undefined,
           cover: 'https://opengraph.githubassets.com/1/' + fullName,
         } satisfies PluginListItem
       })

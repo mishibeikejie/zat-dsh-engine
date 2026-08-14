@@ -41,6 +41,8 @@ interface MarketItem {
   latestVersion?: string | null
   hasUpdate?: boolean
   isHarness?: boolean
+  /** Installed as a dependency but absent from bundles (never loads). */
+  disabled?: boolean
 }
 
 interface MarketListResult {
@@ -289,6 +291,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [notice, setNotice] = useState('')
   const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
+  const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -368,6 +371,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     void pm.selfupdate(false).then((r) => {
       if (r.ok && r.value.ok && r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion })
     }).catch(() => { /* best effort */ })
+    void pm.installed().then((r) => {
+      if (r.ok && r.value.ok) {
+        setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || '') })
+      }
+    }).catch(() => { /* best effort */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -397,11 +405,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         setNotice(String(value.message || ''))
         return
       }
-      setNotice(res.ok ? String(value?.message || (value?.ok ? t('已安装,重启 dsh 生效', 'Installed — restart dsh to activate') : t('安装失败', 'Install failed'))) : res.error.message)
+      setNotice(res.ok ? String(value?.message || (value?.ok ? t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.') : t('安装失败', 'Install failed'))) : res.error.message)
       if (res.ok && value?.ok) refreshItem(item.fullName, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
     }).catch((err: unknown) => {
       setInstalling('')
-      setNotice(String((err as { message?: string })?.message || err))
+      setNotice(t('安装出错:', 'Install error: ') + String((err as { message?: string })?.message || err))
     })
   }
 
@@ -410,7 +418,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     void pm.installPlugin(choice.owner, choice.repo, sub.dir).then((res) => {
       setInstalling('')
       const value = res.ok ? res.value : null
-      setNotice(res.ok ? String(value?.message || (value?.ok ? t('已安装,重启 dsh 生效', 'Installed — restart dsh to activate') : t('安装失败', 'Install failed'))) : res.error.message)
+      setNotice(res.ok ? String(value?.message || (value?.ok ? t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.') : t('安装失败', 'Install failed'))) : res.error.message)
       if (res.ok && value?.ok) {
         setSubChoices(null)
         refreshItem(choice.owner + '/' + choice.repo, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
@@ -451,6 +459,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function cardAction(item: MarketItem): void {
     if (item.isHarness) { setDetail(item); return }
+    if (item.disabled) { setDetail(item); return }
     if (item.installed && item.hasUpdate) doUpdate(item)
     else if (!item.installed) doInstall(item)
     else setDetail(item)
@@ -520,6 +529,14 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                 : ''}
             </div>
           )}
+          {detail.disabled && !detail.isHarness && (
+            <div className="zat-subchoices">
+              <div className="zat-subchoices-title">
+                {t('这个插件已安装,但不在启用列表里——重启 dsh 也不会加载。', 'This plugin is installed but missing from the bundle list — it will not load even after a restart.')}
+                {' ' + t('重新点一次安装通常能修复;或手动运行 dsh plugin 命令启用。', 'Installing again usually fixes it, or enable it with the dsh plugin command.')}
+              </div>
+            </div>
+          )}
           {ddesc && <div className="zat-summary"><span className="zat-zhlabel">{t('简介:', 'About:')}</span>{ddesc}</div>}
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
           {dd
@@ -570,6 +587,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
       </div>
+      {notice && <div className="zat-notice">{notice}</div>}
       {subChoices && (
         <div className="zat-subchoices">
           <div className="zat-subchoices-title">{t('这个插件包含多个部分,请选择要安装的:', 'This plugin bundles several parts — choose one to install:')}</div>
@@ -593,10 +611,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {loading && <div className="zat-loading">{t('正在加载…', 'Loading…')}</div>}
       </div>
       <div className="zat-foot">
-        <span className="zat-count">{t('已加载 ', 'Loaded ')}{items ? items.length : 0} / {total}{t(' · 滚动到底自动加载 · GitHub 搜索上限 1000', ' · scroll to load more · GitHub cap 1000')}</span>
+        <span className="zat-count">
+          {profileInfo && profileInfo.profileName ? `${t('当前 profile:', 'Profile: ')}${profileInfo.profileName} · ${profileInfo.profileDir} · ` : ''}
+          {t('已加载 ', 'Loaded ')}{items ? items.length : 0} / {total}{t(' · 滚动到底自动加载 · GitHub 搜索上限 1000', ' · scroll to load more · GitHub cap 1000')}
+        </span>
         {page * 100 < total && !loading && <button className="zat-btn" onClick={() => load(page + 1, sort, query, category, true)}>{t('加载更多 ↓', 'Load more ↓')}</button>}
       </div>
-      {notice && <div className="zat-notice">{notice}</div>}
     </div>
   )
 }
@@ -614,12 +634,14 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
-  const btnClass = hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install')
+  const btnClass = item.disabled ? 'zat-installed' : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
   const btnText = installing
     ? t('处理中…', '...')
     : item.isHarness
       ? (zh ? '✓ 使用中' : '✓ In use')
-      : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
+      : item.disabled
+        ? (zh ? '已装·未启用' : 'Installed, disabled')
+        : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
   return (
     <div className="zat-card" onClick={() => onOpen(item)}>
       <div className="zat-cover">
