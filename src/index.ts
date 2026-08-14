@@ -118,7 +118,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.1.1'
+const SELF_VERSION = '0.1.2'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -704,6 +704,13 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const o = String(owner || '')
       const r = String(repo || '')
+      // Monorepo guard: a repository whose root declares no package.json
+      // cannot be one-click installed (the real plugin lives in a subdir).
+      // Detect it before pnpm fetches, and tell the user how to proceed.
+      const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
+      if (rootPkg.status !== 200) {
+        return { ok: false, message: `⚠ ${o}/${r} 是多插件仓库(根目录没有 package.json),无法一键安装。请到该仓库的 GitHub 页面查看各子插件的安装方式。` }
+      }
       const res = await this.addSpec(o, r)
       return res.ok
         ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r} — restart dsh to activate` }
