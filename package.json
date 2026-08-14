@@ -1,7 +1,7 @@
 {
   "name": "zat-dsh-engine",
   "description": "Zat-DSH Engine — the visual plugin marketplace for DeepSeek Harness. Browse, search, install, update and uninstall community plugins from GitHub's dsh-plugin topic, with bilingual intros and a China mirror fallback.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -30,7 +30,7 @@
     }
   },
   "scripts": {
-    "build": "tsdown"
+    "build": "tsc --noEmit && tsdown"
   },
   "keywords": [
     "dsh",
@@ -52,16 +52,17 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-typert-protocol": "*",
-    "@deepseek-ai/dsh-subprocess": "*",
     "@deepseek-ai/dsh-fs": "*",
     "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
     "react": "^18.2.0"
   },
   "dependencies": {
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
     "tsdown": "^0.22.0",

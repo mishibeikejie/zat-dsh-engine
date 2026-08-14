@@ -42,18 +42,6 @@ interface SubprocessFace {
   }): SpawnHandle
 }
 
-interface FsTarget {
-  targetKey: string
-  displayPath: string
-}
-
-interface FsFace {
-  resolve(path: string): Promise<FsTarget>
-  readText(target: FsTarget): Promise<string>
-  writeText(target: FsTarget, content: string): Promise<unknown>
-  listDir(target: FsTarget): Promise<Array<{ name: string }>>
-}
-
 interface LlmChunk {
   type?: string
   text?: string
@@ -123,7 +111,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.2.1'
+const SELF_VERSION = '0.3.0'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -144,11 +132,29 @@ function encodeQueryPart(s: string): string {
   return s.replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\s+/g, '+')
 }
 
+/** Reject anything that is not a plain GitHub owner/repo segment. */
+function safeSegment(value: string): string {
+  const v = String(value || '').trim()
+  return /^[\w.-]+$/.test(v) ? v : ''
+}
+
+/** Subdirectory spec: nested path segments, no traversal, no shell chars. */
+function safeSubdir(value: string): string | null {
+  const v = String(value || '').trim().replace(/^\/+/, '')
+  if (v === '') return ''
+  return /^[\w.-]+(?:\/[\w.-]+)*$/.test(v) ? v : null
+}
+
+/** npm package name (scoped or bare). */
+function safePackageName(value: string): string | null {
+  const v = String(value || '').trim()
+  return /^@?[\w.-]+(?:\/[\w.-]+)?$/.test(v) ? v : null
+}
+
 export class ZatMarketGateway extends TypertRemoteService {
-  static inject = ['subprocess', 'fs', 'llm']
+  static inject = ['subprocess']
 
   private readonly subprocess: SubprocessFace
-  private readonly fs: FsFace
   private readonly llm: LlmFace | undefined
 
   private home: string | null = null
@@ -167,7 +173,6 @@ export class ZatMarketGateway extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'pluginMarket')
     this.subprocess = this.ctx.get('subprocess') as unknown as SubprocessFace
-    this.fs = this.ctx.get('fs') as unknown as FsFace
     this.llm = this.ctx.get('llm') as unknown as LlmFace | undefined
   }
 
@@ -268,8 +273,10 @@ export class ZatMarketGateway extends TypertRemoteService {
     const dir = join(h, 'profiles')
     let names: string[] = []
     try { names = readdirSync(dir) } catch { names = [] }
-    for (const n of names) {
-      if (n === 'node_modules' || n === 'plugins') continue
+    const candidates = names.filter((n) => n !== 'node_modules' && n !== 'plugins')
+    // Prefer the shipped web profile when several exist (deterministic).
+    const ordered = candidates.includes('web') ? ['web', ...candidates.filter((n) => n !== 'web')] : candidates
+    for (const n of ordered) {
       try {
         if (existsSync(join(dir, n, 'package.json'))) {
           this.profileNameValue = n
@@ -371,12 +378,16 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!this.directDown) {
       const r = await this.httpGet(url)
       if (r.status === 200) return r
+      // A definitive HTTP answer (404/403/…) is the same on the mirror —
+      // return it instead of burning three more requests.
+      if (r.status >= 400) return r
       lastError = r.error || ''
       this.directDown = true
     }
     if (!this.mirrorDown) {
       const mr = await this.httpGet(MIRROR + url)
       if (mr.status === 200) return mr
+      if (mr.status >= 400) return mr
       lastError = mr.error || lastError
       this.mirrorDown = true
     }
@@ -542,10 +553,14 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   private async addSpec(owner: string, repo: string, subdir?: string): Promise<{ ok: boolean; packageName: string | null; message?: string }> {
-    const spec = subdir ? `github:${owner}/${repo}#path:${subdir}` : 'github:' + owner + '/' + repo
+    const o = safeSegment(owner)
+    const repoName = safeSegment(repo)
+    const s = subdir === undefined ? undefined : safeSubdir(subdir)
+    if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
+    const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
-    const r = await this.pnpmShell('pnpm add ' + spec, dir)
-    if (r.outcome.exitCode !== 0) return { ok: false, packageName: null, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
+    const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
+    if (pnpmResult.outcome.exitCode !== 0) return { ok: false, packageName: null, message: (pnpmResult.stderr || pnpmResult.stdout || 'pnpm failed').slice(0, 2000) }
     const after = await this.readProfile()
     const deps = Object.keys((after.dependencies || {}) as Record<string, string>)
     const bundles = Array.isArray((after.dsh as JsonObject | undefined)?.profile && ((after.dsh as JsonObject).profile as JsonObject).bundles)
@@ -555,7 +570,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const name of deps) {
       if (bundles.includes(name)) continue
       const specVal = String(((after.dependencies || {}) as Record<string, string>)[name] || '')
-      if (!specVal.toLowerCase().includes(owner.toLowerCase() + '/' + repo.toLowerCase())) continue
+      if (!specVal.toLowerCase().includes(o.toLowerCase() + '/' + repoName.toLowerCase())) continue
       try {
         const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
         if (meta.dsh?.bundle?.patch) { bundles.push(name); added = name }
@@ -590,8 +605,12 @@ export class ZatMarketGateway extends TypertRemoteService {
       const r = await this.ghGet(url)
       if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.error ? ' — ' + r.error : ''}。直连与镜像均未成功:请确认网络可用;使用 VPN 时请开启系统代理模式,或安装 curl(Windows 自带)。` }
       let json: { items?: unknown[]; total_count?: number } | null = null
-      try { json = JSON.parse(r.body) as typeof json } catch { /* fall through */ }
-      if (!json || !Array.isArray(json.items)) return { ok: false, message: 'unexpected GitHub response' }
+      try {
+        json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
+      } catch {
+        json = null
+      }
+      if (json === null || !Array.isArray(json.items)) return { ok: false, message: 'unexpected GitHub response' }
       let profile: JsonObject | null = null
       try { profile = await this.readProfile() } catch { profile = null }
       const inst = profile ? this.installedMap(profile) : {}
@@ -657,7 +676,9 @@ export class ZatMarketGateway extends TypertRemoteService {
         seen[full] = true
         const local = await this.localVersion(entry.name)
         const remote = await this.remoteVersion(entry.owner, entry.repo, entry.subdir)
-        map[full] = { local, remote, hasUpdate: !!(local && remote && local !== remote) }
+        // Lower-case key: the client indexes with the GitHub full name in
+        // lower case, immune to owner/repo case drift in specs.
+        map[full.toLowerCase()] = { local, remote, hasUpdate: !!(local && remote && local !== remote) }
       }
     } catch { /* empty map */ }
     return { ok: true, map }
@@ -710,7 +731,14 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const p = await this.readProfile()
       const inst = this.installedMap(p)
-      const entries = Object.keys(inst).map((key) => ({ key, name: inst[key]!.name, spec: inst[key]!.spec }))
+      const seen = new Set<string>()
+      const entries: Array<{ key: string; name: string; spec: string }> = []
+      for (const key of Object.keys(inst)) {
+        const entry = inst[key]!
+        if (seen.has(entry.name)) continue
+        seen.add(entry.name)
+        entries.push({ key, name: entry.name, spec: entry.spec })
+      }
       const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
       return {
         ok: true,
@@ -729,8 +757,9 @@ export class ZatMarketGateway extends TypertRemoteService {
   @Remote('detail')
   async detail(owner: string, repo: string): Promise<JsonObject> {
     try {
-      const o = String(owner || '')
-      const r = String(repo || '')
+      const o = safeSegment(owner)
+      const r = safeSegment(repo)
+      if (!o || !r) return { ok: false, message: 'invalid repository name' }
       const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
       const isMonorepo = rootPkg.status !== 200
       const files = ['README.zh.md', 'README_zh.md', 'README.md', 'readme.md', 'README.en.md']
@@ -776,8 +805,9 @@ export class ZatMarketGateway extends TypertRemoteService {
   @Remote('subpackages')
   async subpackages(owner: string, repo: string): Promise<JsonObject> {
     try {
-      const o = String(owner || '')
-      const r = String(repo || '')
+      const o = safeSegment(owner)
+      const r = safeSegment(repo)
+      if (!o || !r) return { ok: false, kind: 'none', packages: [], message: 'invalid repository name' }
       // Single package: the root manifest itself declares the bundle patch.
       const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
       if (rootPkg.status === 200) {
@@ -814,19 +844,28 @@ export class ZatMarketGateway extends TypertRemoteService {
   @Remote('installPlugin')
   async install(owner: string, repo: string, subdir: string): Promise<JsonObject> {
     try {
-      const o = String(owner || '')
-      const r = String(repo || '')
-      const s = String(subdir || '').replace(/^\/+/, '')
-      // Monorepo guard: when no subdir was picked and the root declares no
-      // package.json, list the bundled sub-plugins for the UI to offer.
+      const o = safeSegment(owner)
+      const r = safeSegment(repo)
+      const s = safeSubdir(subdir)
+      if (!o || !r || s === null) return { ok: false, message: 'invalid repository name or subdirectory' }
+      // When no subdir was picked and the root has no package.json, the
+      // plugins live in subdirectories: auto-install when there is exactly
+      // one, otherwise return the list for the UI to offer a choice.
       if (!s) {
         const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${o}/${r}/HEAD/package.json`)
         if (rootPkg.status !== 200) {
           const sub = await this.subpackages(o, r)
-          if (sub.ok && sub.kind === 'multi' && Array.isArray(sub.packages) && sub.packages.length > 0) {
-            return { ok: false, kind: 'multi', packages: sub.packages, message: `${o}/${r} 是多插件仓库,请选择要安装的子插件。` }
+          if (sub.ok && Array.isArray(sub.packages) && sub.packages.length > 0) {
+            if (sub.packages.length === 1) {
+              const only = sub.packages[0]!
+              const res = await this.addSpec(o, r, only.dir)
+              return res.ok
+                ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效` }
+                : { ok: false, message: res.message }
+            }
+            return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
           }
-          return { ok: false, message: `⚠ ${o}/${r} 是多插件仓库(根目录没有 package.json),且未找到可安装的子插件。请到该仓库的 GitHub 页面查看安装方式。` }
+          return { ok: false, message: '这个仓库没有找到可安装的插件,请到 GitHub 页面查看说明。' }
         }
       }
       const res = await this.addSpec(o, r, s || undefined)
@@ -841,9 +880,10 @@ export class ZatMarketGateway extends TypertRemoteService {
   @Remote('update')
   async update(owner: string, repo: string, subdir: string): Promise<JsonObject> {
     try {
-      const o = String(owner || '')
-      const r = String(repo || '')
-      const s = String(subdir || '').replace(/^\/+/, '')
+      const o = safeSegment(owner)
+      const r = safeSegment(repo)
+      const s = safeSubdir(subdir)
+      if (!o || !r || s === null) return { ok: false, message: 'invalid repository name or subdirectory' }
       const res = await this.addSpec(o, r, s || undefined)
       const version = await this.remoteVersion(o, r, s || undefined)
       return res.ok
@@ -857,7 +897,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   @Remote('uninstall')
   async uninstall(name: string): Promise<JsonObject> {
     try {
-      const n = String(name || '')
+      const n = safePackageName(name)
+      if (!n) return { ok: false, message: 'invalid package name' }
       const dir = await this.getProfileDir()
       const r = await this.pnpmShell('pnpm remove ' + n, dir)
       if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }

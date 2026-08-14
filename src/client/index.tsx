@@ -144,7 +144,8 @@ interface LocaleFace {
 
 interface SlotsFace {
   inject(name: string, callback: () => unknown): unknown
-  register(options: Record<string, unknown>, component: React.ComponentType<Record<string, never>>): unknown
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  register(options: Record<string, unknown>, component: React.ComponentType<any>): unknown
 }
 
 function isZh(id: string): boolean {
@@ -346,12 +347,16 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     if (!installed.length) return
     void pm.versions().then((vr) => {
       if (vr.ok && vr.value.ok && vr.value.map) {
-        setItems((prev) => prev ? prev.map((it) => vr.value.map[it.fullName] ? {
-          ...it,
-          installedVersion: vr.value.map[it.fullName]!.local,
-          latestVersion: vr.value.map[it.fullName]!.remote,
-          hasUpdate: vr.value.map[it.fullName]!.hasUpdate,
-        } : it) : prev)
+        setItems((prev) => prev ? prev.map((it) => {
+          const entry = vr.value.map[it.fullName.toLowerCase()]
+          if (!entry) return it
+          return {
+            ...it,
+            installedVersion: entry.local,
+            latestVersion: entry.remote,
+            hasUpdate: entry.hasUpdate,
+          }
+        }) : prev)
       }
     }).catch(() => { /* best effort */ })
   }
@@ -453,7 +458,8 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     setDetail(item)
     setDetailData(null)
     void pm.detail(item.owner, item.name).then((res) => {
-      setDetailData(res.ok && res.value.ok ? res.value : null)
+      if (!res.ok || !res.value.ok) { setDetailData(null); return }
+      setDetailData(res.value)
     }).catch(() => setDetailData(null))
   }
 
@@ -474,7 +480,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   if (detail) {
     const dd = detailData
     const ddesc = (zh && detail.zhIntro) ? detail.zhIntro : (detail.description || '')
-    const mainBtn = !detail.installed && !(dd?.isMonorepo)
+    const mainBtn = !detail.installed
       ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
       : detail.installed && detail.hasUpdate
         ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
@@ -499,11 +505,10 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             {detail.installed && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
             {detail.hasUpdate && detail.latestVersion && <span className="zat-ver">{t('最新 v', 'Latest v')}{detail.latestVersion}</span>}
           </div>
-          {dd?.isMonorepo && <div className="zat-monobadge">{t('⚠ 这是多插件仓库(根目录无 package.json),无法一键安装,请到 GitHub 查看各子插件的安装方式', '⚠ Multi-plugin repo (no root package.json); open GitHub for per-plugin install steps')}</div>}
           {ddesc && <div className="zat-summary"><span className="zat-zhlabel">{t('简介:', 'About:')}</span>{ddesc}</div>}
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
           {dd
-            ? <div className="zat-summary"><span className="zat-zhlabel">{t('README 摘要:', 'README:')}</span>{(dd.summary || t('该仓库暂无 README 摘要', 'No README summary')).slice(0, 1200)}</div>
+            ? <div className="zat-summary"><span className="zat-zhlabel">{t('README 摘要:', 'README:')}</span>{String(dd.summary || t('该仓库暂无 README 摘要', 'No README summary')).slice(0, 1200)}</div>
             : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>}
           <div className="zat-actions">
             {mainBtn}
@@ -552,7 +557,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       </div>
       {subChoices && (
         <div className="zat-subchoices">
-          <div className="zat-subchoices-title">{t('这是多插件仓库,请选择要安装的子插件:', 'Multi-plugin repository — choose a sub-package to install:')}</div>
+          <div className="zat-subchoices-title">{t('这个插件包含多个部分,请选择要安装的:', 'This plugin bundles several parts — choose one to install:')}</div>
           {subChoices.packages.map((sub) => (
             <div key={sub.dir} className="zat-subrow">
               <span className="zat-subname">{sub.name}<small>({sub.dir}{sub.version ? ` v${sub.version}` : ''})</small></span>

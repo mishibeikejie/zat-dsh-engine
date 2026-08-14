@@ -13,10 +13,11 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 - **Live search** — type to filter, no Enter key needed; clearing the box returns to the full list
 - **Bilingual intros** — 999 pre-translated Chinese intros bundled; new plugins are translated on the fly by your current model; English UI shows the original GitHub description
 - **Install / Update / Uninstall** — one click, powered by the official `dsh plugin` profile mechanism (`pnpm` under the hood)
+- **Monorepo-aware install** — repositories that bundle several plugins install correctly: a single-plugin repo installs silently, multi-plugin repos offer a plain-language picker
 - **Installed detection** — marks plugins you already have, with version comparison and an **update badge** when a newer version is released
-- **China mirror fallback** — if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover
+- **Cross-platform** — full Windows and Linux support (PowerShell / sh, curl / wget, system-proxy aware)
+- **Network auto-adaptation** — inherits your VPN/system proxy for fetching and installing; if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover
 - **Self-update** — a button appears beside the title when a newer version of the marketplace itself is available
-- **Monorepo detection** — warns when a repository bundles several plugins and cannot be one-click installed
 
 ## Installation
 
