@@ -43,6 +43,8 @@ interface MarketItem {
   isHarness?: boolean
   /** Installed as a dependency but absent from bundles (never loads). */
   disabled?: boolean
+  /** Repo kind: plugin | nonplugin | multi | skill. */
+  kind?: string
 }
 
 interface MarketListResult {
@@ -196,6 +198,8 @@ const css = `
 .zat-cardbtn.zat-install{background:linear-gradient(90deg,#3d6bff,#7a4dff);color:#fff}
 .zat-cardbtn.zat-update{background:linear-gradient(90deg,#0ea5e9,#22d3ee);color:#fff}
 .zat-cardbtn.zat-installed{background:var(--color-bg3,#1d2b21);color:#34d399;border:1px solid rgba(52,211,153,.35)}
+.zat-cardbtn.zat-noninstall{background:#3a2a1a;color:#fbbf24;border:1px solid rgba(251,191,36,.4)}
+.zat-cardbtn.zat-nonplugin{background:var(--color-bg3,#22252e);color:var(--color-fg3,#8b94a5);border:1px solid var(--color-border,#ffffff14)}
 .zat-status{text-align:center;padding:40px 0;color:var(--color-fg3,#7c8698);font-size:13px}
 .zat-status.zat-error{color:#f87171}
 .zat-foot{display:flex;justify-content:center;align-items:center;gap:10px;padding:6px 0;flex-wrap:wrap}
@@ -460,6 +464,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   function cardAction(item: MarketItem): void {
     if (item.isHarness) { setDetail(item); return }
     if (item.disabled) { setDetail(item); return }
+    if (item.kind === 'skill' || item.kind === 'nonplugin') { setDetail(item); return }
     if (item.installed && item.hasUpdate) doUpdate(item)
     else if (!item.installed) doInstall(item)
     else setDetail(item)
@@ -641,14 +646,21 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction }: MarketCardPro
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
-  const btnClass = item.disabled ? 'zat-installed' : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
+  const nonInstallable = item.kind === 'skill' || item.kind === 'nonplugin'
+  const btnClass = nonInstallable
+    ? (item.kind === 'skill' ? 'zat-noninstall' : 'zat-nonplugin')
+    : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
   const btnText = installing
     ? t('处理中…', '...')
     : item.isHarness
       ? (zh ? '✓ 使用中' : '✓ In use')
       : item.disabled
         ? (zh ? '已装·未启用' : 'Installed, disabled')
-        : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
+        : nonInstallable
+          ? (item.kind === 'skill'
+            ? (zh ? '技能 · 不可安装' : 'Skill · not installable')
+            : (zh ? '非插件 · 不可安装' : 'Not a plugin'))
+          : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
   return (
     <div className="zat-card" onClick={() => onOpen(item)}>
       <div className="zat-cover">

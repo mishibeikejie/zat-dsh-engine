@@ -17,6 +17,7 @@ import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
+import bundledKinds from '../data/kinds.json'
 
 /** Host platform facts (this package is a plain Node ESM module). */
 const IS_WIN = process.platform === 'win32'
@@ -96,6 +97,8 @@ interface PluginListItem {
   isHarness?: boolean
   /** Installed as a dependency but absent from dsh.profile.bundles (never loads). */
   disabled?: boolean
+  /** Repo kind: plugin | nonplugin | multi | skill | unknown. */
+  kind?: string
   cover: string
 }
 
@@ -176,6 +179,9 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   private readonly caches = new Map<string, { at: number; data: unknown }>()
   private readonly zhCache = new Map<string, { at: number; zh: string }>()
+  /** Repo kind (plugin/nonplugin/multi/skill) merged from bundled data + live scan. */
+  private readonly kindCache = new Map<string, string>()
+  private kindScanStarted = false
 
   constructor(ctx: Context) {
     super(ctx, 'pluginMarket')
@@ -213,6 +219,57 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
     if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
     return { outcome, stdout, stderr }
+  }
+
+  /**
+   * Classify one repository: plugin (root bundle), nonplugin (root manifest
+   * without a bundle), multi (subdirectory bundles), skill (no installable
+   * plugin declaration at all).
+   */
+  private async detectKind(owner: string, repo: string): Promise<string> {
+    const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/package.json`)
+    if (rootPkg.status === 200) {
+      try {
+        const meta = JSON.parse(rootPkg.body) as { dsh?: { bundle?: { patch?: string } } }
+        return meta.dsh?.bundle?.patch ? 'plugin' : 'nonplugin'
+      } catch { return 'nonplugin' }
+    }
+    const sub = await this.subpackages(owner, repo)
+    if (sub.ok && Array.isArray(sub.packages) && sub.packages.length > 0) return 'multi'
+    return 'skill'
+  }
+
+  /** Look up a repo kind: live scan wins, then the bundled snapshot. */
+  private kindOf(fullNameLower: string): string {
+    const live = this.kindCache.get(fullNameLower)
+    if (live !== undefined) return live
+    const bundled = (bundledKinds as unknown as Record<string, string>)[fullNameLower]
+    if (bundled) {
+      this.kindCache.set(fullNameLower, bundled)
+      return bundled
+    }
+    return 'unknown'
+  }
+
+  /** Background scan of repos the bundled snapshot does not know yet. */
+  private async startKindScan(items: Array<{ owner: string; name: string; fullName: string }>): Promise<void> {
+    if (this.kindScanStarted) return
+    this.kindScanStarted = true
+    const queue = items.filter((it) => this.kindOf(it.fullName.toLowerCase()) === 'unknown')
+    if (queue.length === 0) return
+    let next = 0
+    const worker = async (): Promise<void> => {
+      while (next < queue.length) {
+        const it = queue[next++]!
+        try {
+          const kind = await this.detectKind(it.owner, it.name)
+          this.kindCache.set(it.fullName.toLowerCase(), kind)
+        } catch { /* stays unknown */ }
+      }
+    }
+    const workers: Promise<void>[] = []
+    for (let w = 0; w < 4; w++) workers.push(worker())
+    void Promise.all(workers)
   }
 
   /** Write a file directly through node:fs (this package is trusted Node code). */
@@ -690,6 +747,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
         const rec = inst[fullName.toLowerCase()] || inst[String(it.name || '').toLowerCase()]
         const isHarness = HARNESS_REPOS.includes(fullName.toLowerCase())
+        const kind = this.kindOf(fullName.toLowerCase())
         return {
           fullName,
           owner: it.owner ? it.owner.login : '',
@@ -709,6 +767,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           installedVersion: isHarness ? this.harnessVersion() : null,
           isHarness: isHarness || undefined,
           disabled: rec && !rec.enabled ? true : undefined,
+          kind: kind === 'unknown' ? undefined : kind,
           cover: 'https://opengraph.githubassets.com/1/' + fullName,
         } satisfies PluginListItem
       })
@@ -722,6 +781,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         source: this.directDown ? 'mirror' : 'direct',
       }
       this.cacheSet(cacheKey, data)
+      // Backfill kinds for repos the bundled snapshot does not know yet.
+      void this.startKindScan(items.map((item) => ({ owner: item.owner, name: item.name, fullName: item.fullName })))
       return data
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
