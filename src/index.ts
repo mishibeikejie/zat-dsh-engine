@@ -765,9 +765,9 @@ export class ZatMarketGateway extends TypertRemoteService {
           installed: isHarness || (rec ? rec.enabled : false),
           installedName: isHarness ? null : (rec ? rec.name : null),
           installedVersion: isHarness ? this.harnessVersion() : null,
-          isHarness: isHarness || undefined,
-          disabled: rec && !rec.enabled ? true : undefined,
-          kind: kind === 'unknown' ? undefined : kind,
+          isHarness: Boolean(isHarness),
+          disabled: Boolean(rec && !rec.enabled),
+          kind,
           cover: 'https://opengraph.githubassets.com/1/' + fullName,
         } satisfies PluginListItem
       })
@@ -921,8 +921,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         summary,
         image,
         isMonorepo,
-        notPlugin: notPlugin || undefined,
-        isHarness: isHarness || undefined,
+        notPlugin: Boolean(notPlugin),
+        isHarness: Boolean(isHarness),
         harnessVersion: harnessLocal,
         harnessRemote,
         harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && harnessLocal !== harnessRemote),
