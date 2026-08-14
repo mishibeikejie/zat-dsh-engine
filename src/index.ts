@@ -123,7 +123,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.2.0'
+const SELF_VERSION = '0.2.1'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -289,40 +289,104 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.profileDirValue
   }
 
-  private async curlGet(url: string): Promise<{ status: number; body: string }> {
-    let curl = 'curl'
-    try { curl = await this.subprocess.resolveExecutable('curl') } catch { /* keep fallback */ }
-    const handle = this.subprocess.spawn({
-      argv: [curl, '-s', '-L', '--max-time', '30', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.1.0', url],
-      cwd: this.shellCwd(),
-      stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
-      graceMs: 60000,
-    })
-    const outcome = await handle.done
-    let stdout = ''
-    if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
-    if (outcome.exitCode !== 0) return { status: 0, body: '' }
-    const lines = String(stdout).trimEnd().split('\n')
-    const status = Number(lines.pop())
-    return { status, body: lines.join('\n') }
+  /**
+   * Read the effective HTTP proxy once. Windows: the system proxy from the
+   * registry (what a VPN's system-proxy mode sets); other platforms: the
+   * HTTP(S)_PROXY environment the process inherited.
+   */
+  private proxyUrl: string | null = null
+  private proxyLoaded = false
+
+  private async loadProxy(): Promise<string | null> {
+    if (this.proxyLoaded) return this.proxyUrl
+    this.proxyLoaded = true
+    if (IS_WIN) {
+      try {
+        const r = await this.runShell("$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue; if($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer){ $s=''+$p.ProxyServer; if($s -notmatch '^https?://'){ $s='http://'+$s }; Write-Output $s }", this.shellCwd())
+        this.proxyUrl = (r.stdout || '').trim() || null
+      } catch { this.proxyUrl = null }
+    } else {
+      this.proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || null
+    }
+    return this.proxyUrl
   }
 
-  private async ghGet(url: string): Promise<{ status: number; body: string }> {
+  /**
+   * Fetch one URL. Tries curl first, then wget (some Linux distributions
+   * ship only wget). On Windows the system proxy is passed explicitly
+   * (--proxy); elsewhere both tools honor the inherited environment.
+   * Failures carry a diagnostic `error` string.
+   */
+  private async httpGet(url: string): Promise<{ status: number; body: string; error?: string }> {
+    const proxy = await this.loadProxy()
+    const proxyArgs = proxy ? ['--proxy', proxy] : []
+    // 1) curl (reports the HTTP status via -w even on 404).
+    let curl = 'curl'
+    try { curl = await this.subprocess.resolveExecutable('curl') } catch { curl = '' }
+    if (curl) {
+      const handle = this.subprocess.spawn({
+        argv: [curl, ...proxyArgs, '-s', '-L', '--max-time', '30', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.2.0', url],
+        cwd: this.shellCwd(),
+        stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
+        graceMs: 60000,
+      })
+      const outcome = await handle.done
+      let stdout = ''
+      let stderr = ''
+      if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
+      if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
+      if (outcome.exitCode === 0) {
+        const lines = String(stdout).trimEnd().split('\n')
+        const status = Number(lines.pop())
+        if (Number.isFinite(status) && status > 0) return { status, body: lines.join('\n') }
+        return { status: 200, body: lines.join('\n') }
+      }
+      if (stderr.trim()) return { status: 0, body: '', error: stderr.trim().slice(0, 200) }
+    }
+    // 2) wget (HTTP status parsed from --server-response stderr).
+    let wget = 'wget'
+    try { wget = await this.subprocess.resolveExecutable('wget') } catch { wget = '' }
+    if (wget) {
+      const handle = this.subprocess.spawn({
+        argv: [wget, '-q', '-O-', '--server-response', '--timeout=30', '--max-redirect=5', '-U', 'zat-dsh-engine/0.2.0', url],
+        cwd: this.shellCwd(),
+        stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
+        graceMs: 60000,
+      })
+      const outcome = await handle.done
+      let stdout = ''
+      let stderr = ''
+      if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
+      if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
+      const statusMatch = stderr.match(/HTTP\/\d(?:\.\d)?\s+(\d{3})/)
+      if (statusMatch) return { status: Number(statusMatch[1]), body: stdout }
+      if (outcome.exitCode === 0) return { status: 200, body: stdout }
+      if (stderr.trim()) return { status: 0, body: '', error: stderr.trim().slice(0, 200) }
+    }
+    return { status: 0, body: '', error: 'no curl or wget available on this system' }
+  }
+
+  private async ghGet(url: string): Promise<{ status: number; body: string; error?: string }> {
+    let lastError = ''
     if (!this.directDown) {
-      const r = await this.curlGet(url)
+      const r = await this.httpGet(url)
       if (r.status === 200) return r
+      lastError = r.error || ''
       this.directDown = true
     }
     if (!this.mirrorDown) {
-      const mr = await this.curlGet(MIRROR + url)
+      const mr = await this.httpGet(MIRROR + url)
       if (mr.status === 200) return mr
+      lastError = mr.error || lastError
       this.mirrorDown = true
     }
-    const r2 = await this.curlGet(url)
+    const r2 = await this.httpGet(url)
     if (r2.status === 200) { this.directDown = false; return r2 }
-    const mr2 = await this.curlGet(MIRROR + url)
+    lastError = r2.error || lastError
+    const mr2 = await this.httpGet(MIRROR + url)
     if (mr2.status === 200) { this.mirrorDown = false; return mr2 }
-    return { status: 0, body: '' }
+    lastError = mr2.error || lastError
+    return { status: 0, body: '', error: lastError }
   }
 
   private async readProfile(): Promise<JsonObject> {
@@ -524,7 +588,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (qText) query += '+' + encodeQueryPart(qText)
       const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
       const r = await this.ghGet(url)
-      if (r.status !== 200) return { ok: false, message: `GitHub API ${r.status} — direct and mirror both failed, please check your network` }
+      if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.error ? ' — ' + r.error : ''}。直连与镜像均未成功:请确认网络可用;使用 VPN 时请开启系统代理模式,或安装 curl(Windows 自带)。` }
       let json: { items?: unknown[]; total_count?: number } | null = null
       try { json = JSON.parse(r.body) as typeof json } catch { /* fall through */ }
       if (!json || !Array.isArray(json.items)) return { ok: false, message: 'unexpected GitHub response' }
