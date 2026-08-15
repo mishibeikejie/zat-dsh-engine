@@ -79,14 +79,16 @@ dsh plugin --profile web remove zat-dsh-engine
 
 **Is the mirror safe?** The mirror is only used when a direct GitHub request fails, and only for public repository metadata.
 
-**dsh won't start after installing a plugin — how do I recover?** After every successful install/uninstall/toggle, the market backs up the last known-good state into the `zat-backup/` folder inside your profile directory. Restore it by copying the three files back over the profile directory (replace `<profile>` with your profile name):
+**dsh won't start after installing a plugin — how do I recover?** After every successful install/uninstall/toggle, the market backs up the last known-good state into the `zat-backup/` folder inside your profile directory. Restore it by copying the three files back over the profile directory.
+
+In the commands below, `web` is your profile name: **everyone using the web GUI has the profile `web`** (unless you started dsh with a custom name — if unsure, open the market and look at the "Profile:" line in the footer; use whatever it says):
 
 ```sh
 # Windows (PowerShell)
-Copy-Item "$HOME\.dsh\profiles\<profile>\zat-backup\*" "$HOME\.dsh\profiles\<profile>\" -Force
+Copy-Item "$HOME\.dsh\profiles\web\zat-backup\*" "$HOME\.dsh\profiles\web\" -Force
 
 # macOS / Linux
-cp ~/.dsh/profiles/<profile>/zat-backup/* ~/.dsh/profiles/<profile>/
+cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 ```
 
 Then start dsh again. This restores the state right after the last successful operation, so the plugin that broke startup is removed from the enabled list and the profile boots normally.

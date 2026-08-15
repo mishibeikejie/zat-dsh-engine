@@ -79,14 +79,16 @@ dsh plugin --profile web remove zat-dsh-engine
 
 **镜像安全吗?** 只有直连 GitHub 失败时才走镜像,而且只拉取公开仓库的元数据。
 
-**装了某个插件之后 dsh 起不来怎么办?** 市场每次成功安装/卸载/启停之后,都会把上一份可用状态自动备份到 profile 目录的 `zat-backup/` 文件夹。恢复只需把里面的三个文件复制回 profile 目录覆盖(把 `<你的profile名>` 换成实际名字):
+**装了某个插件之后 dsh 起不来怎么办?** 市场每次成功安装/卸载/启停之后,都会把上一份可用状态自动备份到 profile 目录的 `zat-backup/` 文件夹。恢复只需把里面的三个文件复制回 profile 目录覆盖。
+
+下面命令里的 `web` 就是你的 profile 名:**用网页版的人都是 `web`**(除非你启动 dsh 时专门用了别的名字;不确定的话,打开插件市场看底部那行「当前 profile:」,写的是啥就填啥):
 
 ```sh
 # Windows (PowerShell)
-Copy-Item "$HOME\.dsh\profiles\<你的profile名>\zat-backup\*" "$HOME\.dsh\profiles\<你的profile名>\" -Force
+Copy-Item "$HOME\.dsh\profiles\web\zat-backup\*" "$HOME\.dsh\profiles\web\" -Force
 
 # macOS / Linux
-cp ~/.dsh/profiles/<你的profile名>/zat-backup/* ~/.dsh/profiles/<你的profile名>/
+cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 ```
 
 然后重新启动 dsh。恢复的是"上一次成功操作"之后的状态,那个把你带崩的插件会被移除出启用名单,profile 可以正常启动。
