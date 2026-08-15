@@ -162,7 +162,9 @@ function safeSegment(value: string): string {
 /** Extract loader row ids from a patch YAML text (line-based, tolerant). */
 function extractPatchIds(yaml: string): Set<string> {
   const ids = new Set<string>()
-  for (const line of String(yaml).split(/\r?\n/)) {
+  for (const rawLine of String(yaml).split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue // comments are not rows
     const m = line.match(/(?:^|\s)id:\s*['"]?([^'"#,\s}]+)/)
     if (m) ids.add(m[1])
   }
@@ -457,7 +459,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     const base = subdir ? `${subdir}/` : ''
     const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
     if (pkgRes.status !== 200) return { block, warn }
-    let meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
+    let meta: { name?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
     try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return { block, warn } }
     // (1) Official packages must be peers, never direct deps — a direct dep
     // installs a second copy and hijacks the official loader rows.
@@ -472,7 +474,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const installed = await this.installedPatchIds()
         for (const id of candIds) {
           const holder = installed.get(id)
-          if (holder) block.push(`挂载行${id}与${holder}重复`)
+          if (holder && holder !== meta.name) block.push(`挂载行${id}与${holder}重复`)
         }
       }
     }
@@ -1399,7 +1401,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const bundles = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
         ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
         : []
-      interface Scanned { name: string; meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
+      interface Scanned { name: string; enabled: boolean; meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
       const scanned: Scanned[] = []
       for (const name of deps) {
         try {
@@ -1408,36 +1410,41 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (meta.dsh?.bundle?.patch) {
             try { patchIds = extractPatchIds(readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8')) } catch { /* no patch file */ }
           }
-          scanned.push({ name, meta, patchIds })
+          const enabled = bundles.includes(name) || name.startsWith('@deepseek-ai/')
+          scanned.push({ name, enabled, meta, patchIds })
           for (const d of Object.keys(meta.dependencies || {})) {
             if (d.startsWith('@deepseek-ai/')) issues.push({ level: 'error', title: `${name} 把官方包 ${d} 写进了 dependencies`, detail: '官方包应使用 peerDependencies 引用;直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。建议反馈给插件作者。' })
           }
           for (const pd of Object.keys(meta.peerDependencies || {})) {
+            if (meta.peerDependenciesMeta?.[pd]?.optional) continue // declared optional — not missing
             const provided = await this.moduleProvided(pd)
             if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: 'profile 关闭了自动安装 peer;这个依赖缺失时插件运行时可能报错。手动安装它或反馈给插件作者。' })
           }
-          if (!bundles.includes(name) && !name.startsWith('@deepseek-ai/')) {
+          if (!enabled && !name.startsWith('@deepseek-ai/')) {
             issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单,重启后不会加载。可在市场卡片上点「启用」。' })
           }
         } catch {
           issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。可能安装未完成,重装一次即可。' })
         }
       }
-      // Duplicate loader row ids across installed bundles.
+      // Duplicate loader row ids across ENABLED bundles (a disabled plugin
+      // does not load, so it cannot collide).
       const idHolders = new Map<string, string>()
       for (const s of scanned) {
+        if (!s.enabled) continue
         for (const id of s.patchIds) {
           const holder = idHolders.get(id)
           if (holder && holder !== s.name) {
-            issues.push({ level: 'error', title: `挂载行 id "${id}" 重复`, detail: `${holder} 和 ${s.name} 都声明了这个行 id,加载时会互相冲突,建议二选一。` })
+            issues.push({ level: 'error', title: `挂载行 id "${id}" 重复`, detail: `${holder} 和 ${s.name} 都声明了这个行 id,加载时会互相冲突,建议二选一。若是有意的覆盖可忽略。` })
           } else if (!holder) {
             idHolders.set(id, s.name)
           }
         }
       }
-      // Shared-dependency major-version conflicts.
+      // Shared-dependency major-version conflicts across ENABLED plugins.
       const declared = new Map<string, Array<{ pkg: string; range: string }>>()
       for (const s of scanned) {
+        if (!s.enabled) continue
         for (const [dep, range] of [...Object.entries(s.meta.dependencies || {}), ...Object.entries(s.meta.peerDependencies || {})]) {
           if (dep.startsWith('@deepseek-ai/')) continue
           if (!declared.has(dep)) declared.set(dep, [])
