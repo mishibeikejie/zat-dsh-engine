@@ -87,6 +87,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     'pluginMarket/taskStatus': (taskId: string) => Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
+    'pluginMarket/installedList': () => Promise<RemoteResult<MarketListResult>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -117,6 +118,7 @@ interface MarketRemote extends TypertClientRemote {
     setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     taskStatus(taskId: string): Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
+    installedList(): Promise<RemoteResult<MarketListResult>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -161,6 +163,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('setEnabled', ['name', 'enabled']),
   desc('healthCheck', []),
   desc('taskStatus', ['taskId']),
+  desc('installedList', []),
   desc('star', ['owner', 'repo']),
   desc('starredList', []),
   desc('setToken', ['token']),
@@ -257,6 +260,7 @@ const css = `
 .zat-hdetail{font-size:12px;color:var(--color-fg2,#a8b2c4);line-height:1.6}
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
 .zat-progress{margin:2px 0}
+.zat-cardprogress{margin-top:8px}
 .zat-pbar{height:8px;border-radius:6px;background:var(--color-bg3,#232a3a);overflow:hidden}
 .zat-pfill{height:100%;background:linear-gradient(90deg,#3d6bff,#7a4dff);border-radius:6px;transition:width .5s}
 .zat-ptext{font-size:11.5px;color:var(--color-fg2,#a8b2c4);margin-top:3px;line-height:1.5}
@@ -341,6 +345,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [sort, setSort] = useState('stars')
   const [category, setCategory] = useState('全部')
   const [instFilter, setInstFilter] = useState<'all' | 'installed' | 'uninstalled' | 'installable'>('all')
+  const [installedMode, setInstalledMode] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -470,13 +475,44 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         return
       }
       const data = res.value
-      setItems((prev) => (append && prev ? [...prev, ...applyStars(data.items)] : applyStars(data.items)))
+      setItems((prev) => {
+        if (!append || !prev) return applyStars(data.items)
+        // GitHub search pagination drifts: dedupe by fullName on append.
+        const merged = prev.slice()
+        for (const it of applyStars(data.items)) {
+          if (!merged.some((m) => m.fullName === it.fullName)) merged.push(it)
+        }
+        return merged
+      })
       setTotal(data.total || 0)
       setPage(p)
       requestZh(data.items)
       requestVersions(data.items)
     }).catch((err: unknown) => {
       loadingRef.current = false
+      setLoading(false)
+      setError(String((err as { message?: string })?.message || err))
+    })
+  }
+
+  /** The installed filter: every installed plugin in one shot, no paging. */
+  function loadInstalled(): void {
+    setLoading(true)
+    setError('')
+    void pm.installedList().then((res) => {
+      setLoading(false)
+      if (!res.ok || !res.value.ok) {
+        setError(res.ok ? String(res.value.message || '') : res.error.message)
+        return
+      }
+      const data = res.value
+      setItems(applyStars(data.items))
+      setTotal(data.total || 0)
+      setPage(1)
+      setInstalledMode(true)
+      requestZh(data.items)
+      requestVersions(data.items)
+    }).catch((err: unknown) => {
       setLoading(false)
       setError(String((err as { message?: string })?.message || err))
     })
@@ -924,7 +960,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <option value="stars">{t('最热门', 'Most stars')}</option>
           <option value="updated">{t('最新更新', 'Recently updated')}</option>
         </select>
-        <select className="zat-sel" value={instFilter} onChange={(e) => setInstFilter(e.currentTarget.value as typeof instFilter)} title={t('安装状态', 'Install status')}>
+        <select className="zat-sel" value={instFilter} onChange={(e) => {
+          const v = e.currentTarget.value as typeof instFilter
+          setInstFilter(v)
+          if (v === 'installed') { loadInstalled() } else { setInstalledMode(false); load(1, sort, query, category, false) }
+        }} title={t('安装状态', 'Install status')}>
           <option value="all">{t('全部插件', 'All')}</option>
           <option value="installed">{t('已安装', 'Installed')}</option>
           <option value="uninstalled">{t('未安装', 'Not installed')}</option>
@@ -934,12 +974,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
-      {progress && (
-        <div className="zat-progress">
-          <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
-          <div className="zat-ptext">⏳ {progress.message}</div>
-        </div>
-      )}
       {showLegend && (
         <div className="zat-legend">
           <span className="zat-lghead">{t('标签说明', 'Badge guide')}:</span>
@@ -971,7 +1005,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {items && items.length === 0 && <div className="zat-status">{t('没有找到插件', 'No plugins found')}</div>}
         {items && items.length > 0 && filtered.length === 0 && <div className="zat-status">{t('当前筛选条件下没有插件', 'No plugins match filters')}</div>}
         {filtered.map((it) => (
-          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} onOpen={openDetail} onAction={cardAction} onStar={onStar} onToggle={doSetEnabled} />
+          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} progress={installing === it.fullName ? progress : null} onOpen={openDetail} onAction={cardAction} onStar={onStar} onToggle={doSetEnabled} />
         ))}
         {loading && <div className="zat-loading">{t('正在加载…', 'Loading…')}</div>}
       </div>
@@ -980,7 +1014,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           {profileInfo && profileInfo.profileName ? `${t('当前 profile:', 'Profile: ')}${profileInfo.profileName} · ${profileInfo.profileDir} · ` : ''}
           {t('已加载 ', 'Loaded ')}{items ? items.length : 0} / {total}{t(' · 滚动到底自动加载 · GitHub 搜索上限 1000', ' · scroll to load more · GitHub cap 1000')}
         </span>
-        {page * 100 < total && !loading && <button className="zat-btn" onClick={() => load(page + 1, sort, query, category, true)}>{t('加载更多 ↓', 'Load more ↓')}</button>}
+        {!installedMode && page * 100 < total && !loading && <button className="zat-btn" onClick={() => load(page + 1, sort, query, category, true)}>{t('加载更多 ↓', 'Load more ↓')}</button>}
       </div>
       <div className="zat-legend">
         <span className="zat-lghead">GitHub Token:</span>
@@ -1004,6 +1038,7 @@ interface MarketCardProps {
   zh: boolean
   t: (zh: string, en: string) => string
   installing: boolean
+  progress: { pct: number; message: string } | null
   onOpen: (item: MarketItem) => void
   onAction: (item: MarketItem) => void
   onStar: (item: MarketItem) => void
@@ -1019,7 +1054,7 @@ function canDisable(item: MarketItem): boolean {
   return true
 }
 
-function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
+function MarketCard({ item, zh, t, installing, progress, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
@@ -1079,7 +1114,12 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar, onToggl
             </button>
           )}
         </div>
-        <button className={`zat-cardbtn ${btnClass}`} onClick={(e) => { e.stopPropagation(); onAction(item) }} disabled={!!installing}>{btnText}</button>
+        {installing && progress
+          ? <div className="zat-cardprogress">
+              <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
+              <div className="zat-ptext">{progress.message}</div>
+            </div>
+          : <button className={`zat-cardbtn ${btnClass}`} onClick={(e) => { e.stopPropagation(); onAction(item) }} disabled={!!installing}>{btnText}</button>}
       </div>
     </div>
   )

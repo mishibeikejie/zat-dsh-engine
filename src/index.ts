@@ -1631,6 +1631,78 @@ export class ZatMarketGateway extends TypertRemoteService {
     return { ok: true, taskId }
   }
 
+  /**
+   * The "installed" filter is served by this endpoint instead of paging
+   * through star-sorted search results: every installed plugin with a known
+   * repo is returned in one shot.
+   */
+  @Remote('installedList')
+  async installedList(): Promise<JsonObject> {
+    try {
+      await this.loadZhCache()
+      const p = await this.readProfile()
+      const inst = this.installedMap(p)
+      const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean }> = []
+      const seen = new Set<string>()
+      for (const rec of Object.values(inst)) {
+        let owner = rec.owner
+        let repo = rec.repo
+        if (!owner || !repo) {
+          const known = Object.entries(KNOWN_MARKET_REPOS).find(([, pkg]) => pkg === rec.name)
+          if (known) { const [full] = known; owner = full.split('/')[0]; repo = full.split('/')[1] }
+        }
+        if (!owner || !repo) continue // link:/unknown sources have no market card
+        const key = (owner + '/' + repo).toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        unique.push({ name: rec.name, owner, repo, enabled: rec.enabled })
+      }
+      const items: JsonObject[] = []
+      let next = 0
+      const worker = async (): Promise<void> => {
+        while (next < unique.length) {
+          const rec = unique[next++]!
+          const fullName = rec.owner + '/' + rec.repo
+          const repoRes = await this.ghGet(`https://api.github.com/repos/${fullName}`)
+          if (repoRes.status !== 200) continue
+          try {
+            const it = JSON.parse(repoRes.body) as { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null }
+            const cachedZh = this.zhCache.get(fullName.toLowerCase())
+            const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
+            items.push({
+              fullName,
+              owner: rec.owner,
+              name: it.name || rec.repo,
+              description: it.description || '',
+              zhIntro: zhIntro || '',
+              needZh: !zhIntro,
+              stars: it.stargazers_count || 0,
+              forks: it.forks_count || 0,
+              language: it.language || '',
+              topics: Array.isArray(it.topics) ? it.topics : [],
+              updatedAt: it.updated_at || '',
+              htmlUrl: it.html_url || `https://github.com/${fullName}`,
+              homepage: it.homepage || '',
+              installed: rec.enabled,
+              installedName: rec.name,
+              installedVersion: null,
+              isHarness: Boolean(HARNESS_REPOS.includes(fullName.toLowerCase())),
+              disabled: Boolean(!rec.enabled),
+              kind: this.kindOf(fullName.toLowerCase()),
+              cover: 'https://opengraph.githubassets.com/1/' + fullName,
+            })
+          } catch { /* skip unreadable repo json */ }
+        }
+      }
+      const workers: Promise<void>[] = []
+      for (let w = 0; w < 3; w++) workers.push(worker())
+      await Promise.all(workers)
+      return { ok: true, items, total: items.length, hasMore: false, page: 1 }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
   /** Enable or disable one installed plugin (add/remove its bundle entry). */
   @Remote('setEnabled')
   async setEnabled(name: string, enabled: boolean): Promise<JsonObject> {
