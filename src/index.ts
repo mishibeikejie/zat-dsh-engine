@@ -1491,10 +1491,22 @@ export class ZatMarketGateway extends TypertRemoteService {
       return { ok: true, hasUpdate: true, current: SELF_VERSION, latestVersion: remote, changes }
     }
     const spec = 'github:' + owner + '/' + repo
-    const dir = await this.getProfileDir()
-    const r = await this.pnpmShell('pnpm add ' + spec, dir)
-    if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
-    return { ok: true, message: 'updated to v' + (await this.remoteVersion(owner, repo)) + ' — restart dsh to activate' }
+    const taskId = this.launchTask(async (id) => {
+      this.setTaskStep(id, 'update', '正在下载市场新版本…')
+      this.setTaskProgress(id, 8, '正在下载市场新版本…(网络慢时可能较久,请稍候)')
+      const dir = await this.getProfileDir()
+      const startedAt = Date.now()
+      const r = await this.pnpmShell('pnpm add ' + spec, dir, () => {
+        const secs = Math.floor((Date.now() - startedAt) / 1000)
+        this.setTaskProgress(id, Math.min(80, 8 + secs * 2), `正在下载市场新版本…(已进行 ${secs} 秒)`)
+      })
+      if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
+      this.invalidateListCache()
+      await this.saveLastKnownGood()
+      this.setTaskProgress(id, 97, '下载完成,收尾中…')
+      return { ok: true, message: '已更新到 v' + (await this.remoteVersion(owner, repo)) + ' — 重启 dsh 后生效' }
+    })
+    return { ok: true, taskId }
   }
 
   @Remote('subpackages')

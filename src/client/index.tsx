@@ -1026,10 +1026,31 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {selfUpdate && (
           <button
             className="zat-updbtn"
+            disabled={!!progress}
             title={t('检测到插件市场新版本 v', 'Plugin Market update available v') + (selfUpdate.latestVersion || '')}
-            onClick={() => { void pm.selfupdate(true).then((r) => { setNotice(r.ok ? String(r.value.message || '') : r.error.message); if (r.ok && r.value.ok) setSelfUpdate(null) }).catch((err: unknown) => setNotice(String((err as { message?: string })?.message || err))) }}
+            onClick={() => {
+              if (progress) return
+              void pm.selfupdate(true).then((r) => {
+                if (!r.ok) { setNotice(r.error.message); return }
+                const value = r.value
+                const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
+                if (taskId) {
+                  pollTask(taskId, (result) => {
+                    if (result && result.ok) {
+                      setSelfUpdate(null)
+                      setNotice(String(result.message || t('✅ 已更新!重启 dsh 后生效。', '✅ Updated! Restart dsh to activate.')))
+                    } else {
+                      setNotice(String((result && result.message) || t('更新失败', 'Update failed')))
+                    }
+                  })
+                  return
+                }
+                setNotice(String(value?.message || ''))
+                if (value && value.ok) setSelfUpdate(null)
+              }).catch((err: unknown) => setNotice(String((err as { message?: string })?.message || err)))
+            }}
           >
-            ↑ {t('更新 v', 'Update v')}{selfUpdate.latestVersion || ''}
+            {progress ? t('更新中…', 'Updating…') : `↑ ${t('更新 v', 'Update v')}${selfUpdate.latestVersion || ''}`}
           </button>
         )}
         <div className="zat-search">
@@ -1057,6 +1078,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
+      {progress && !installing && (
+        <div className="zat-progress">
+          <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
+          <div className="zat-ptext">⏳ {progress.message}</div>
+        </div>
+      )}
       {showLegend && (selfUpdate && selfUpdate.changes && selfUpdate.changes.length > 0
         ? (
             <div className="zat-legend">
