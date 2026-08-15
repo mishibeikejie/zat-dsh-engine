@@ -564,6 +564,11 @@ export class ZatMarketGateway extends TypertRemoteService {
     this.caches.set(key, { at: Date.now(), data })
   }
 
+  /** Mutating operations must drop stale list snapshots or cards show outdated install state. */
+  private invalidateListCache(): void {
+    this.caches.clear()
+  }
+
   private async loadZhCache(): Promise<void> {
     if (this.zhLoaded) return
     this.zhLoaded = true
@@ -682,6 +687,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
+    this.invalidateListCache()
     const snap = await this.snapshotProfile(dir)
     const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
     if (pnpmResult.outcome.exitCode !== 0) {
@@ -1082,6 +1088,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const n = safePackageName(name)
       if (!n) return { ok: false, message: 'invalid package name' }
       const dir = await this.getProfileDir()
+      this.invalidateListCache()
       const snap = await this.snapshotProfile(dir)
       const r = await this.pnpmShell('pnpm remove ' + n, dir)
       if (r.outcome.exitCode !== 0) {
@@ -1110,6 +1117,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const n = safePackageName(name)
       if (!n) return { ok: false, message: 'invalid package name' }
       const dir = await this.getProfileDir()
+      this.invalidateListCache()
       const p = await this.readProfile()
       const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
       const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
