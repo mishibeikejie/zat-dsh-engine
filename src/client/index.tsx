@@ -86,6 +86,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
+    'pluginMarket/taskStatus': (taskId: string) => Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -115,6 +116,7 @@ interface MarketRemote extends TypertClientRemote {
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
     setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
+    taskStatus(taskId: string): Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -158,6 +160,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('uninstall', ['name']),
   desc('setEnabled', ['name', 'enabled']),
   desc('healthCheck', []),
+  desc('taskStatus', ['taskId']),
   desc('star', ['owner', 'repo']),
   desc('starredList', []),
   desc('setToken', ['token']),
@@ -253,6 +256,10 @@ const css = `
 .zat-h-info .zat-htitle{color:var(--color-fg2,#c3ccdb)}
 .zat-hdetail{font-size:12px;color:var(--color-fg2,#a8b2c4);line-height:1.6}
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
+.zat-progress{margin:2px 0}
+.zat-pbar{height:8px;border-radius:6px;background:var(--color-bg3,#232a3a);overflow:hidden}
+.zat-pfill{height:100%;background:linear-gradient(90deg,#3d6bff,#7a4dff);border-radius:6px;transition:width .5s}
+.zat-ptext{font-size:11.5px;color:var(--color-fg2,#a8b2c4);margin-top:3px;line-height:1.5}
 .zat-detail{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;padding:2px}
 .zat-dcover{width:100%;max-width:480px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:var(--color-bg2,#1c2333);border:1px solid var(--color-border,#ffffff14)}
 .zat-dcover img{width:100%;height:100%;object-fit:cover}
@@ -349,6 +356,8 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [tokenInput, setTokenInput] = useState('')
   const [health, setHealth] = useState<HealthIssue[] | null>(null)
   const [checking, setChecking] = useState(false)
+  const [progress, setProgress] = useState<{ pct: number; message: string } | null>(null)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const starredSetRef = useRef<Set<string> | null>(null)
@@ -432,6 +441,9 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     })
     return () => { off?.() }
   }, [locale])
+
+  // Stop polling when the panel unmounts.
+  useEffect(() => () => { if (pollTimerRef.current) clearTimeout(pollTimerRef.current) }, [])
 
   // Notices auto-fade so a stale message never sticks to the panel.
   useEffect(() => {
@@ -530,20 +542,74 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     setDetail((d) => (d && d.fullName === fullName ? { ...d, ...patch } : d))
   }
 
+  /** Poll a background task, rendering its progress until it finishes. */
+  function pollTask(taskId: string, onDone: (result: MarketJson) => void): void {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    const tick = (): void => {
+      void pm.taskStatus(taskId).then((res) => {
+        if (!res.ok) {
+          setProgress(null)
+          setInstalling('')
+          setNotice(String(res.error.message))
+          return
+        }
+        const task = (res.value && res.value.task) as { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } | undefined
+        if (!task) {
+          setProgress(null)
+          setInstalling('')
+          setNotice(t('任务状态丢失', 'Task status lost'))
+          return
+        }
+        if (task.done) {
+          setProgress(null)
+          setInstalling('')
+          onDone(task.result || { ok: false, message: t('任务无结果', 'No task result') })
+          return
+        }
+        setProgress({ pct: Math.max(1, Math.min(99, Number(task.progress) || 1)), message: String(task.message || t('处理中…', 'Working…')) })
+        pollTimerRef.current = setTimeout(tick, 600)
+      }).catch((err: unknown) => {
+        setProgress(null)
+        setInstalling('')
+        setNotice(String((err as { message?: string })?.message || err))
+      })
+    }
+    tick()
+  }
+
   function doInstall(item: MarketItem): void {
     setInstalling(item.fullName)
+    setProgress({ pct: 2, message: t('正在准备安装…', 'Preparing install…') })
     void pm.installPlugin(item.owner, item.name, '').then((res) => {
-      setInstalling('')
       const value = res.ok ? res.value : null
+      if (!res.ok) { setProgress(null); setInstalling(''); setNotice(res.error.message); return }
       // Monorepo: the host returns the bundled sub-plugins; offer them.
-      if (res.ok && value && value.kind === 'multi' && Array.isArray(value.packages) && value.packages.length > 0) {
+      if (value && value.kind === 'multi' && Array.isArray(value.packages) && value.packages.length > 0) {
+        setProgress(null)
+        setInstalling('')
         setSubChoices({ owner: item.owner, repo: item.name, packages: value.packages })
         setNotice(String(value.message || ''))
         return
       }
-      setNotice(res.ok ? String(value?.message || (value?.ok ? t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.') : t('安装失败', 'Install failed'))) : res.error.message)
-      if (res.ok && value?.ok) refreshItem(item.fullName, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
+      const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
+      if (taskId) {
+        pollTask(taskId, (result) => {
+          if (result && result.ok) {
+            setNotice(String(result.message || t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.')))
+            refreshItem(item.fullName, { installed: true, disabled: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+          } else {
+            setNotice(String((result && result.message) || t('安装失败', 'Install failed')))
+          }
+        })
+        return
+      }
+      // Synchronous fallback (should not normally happen).
+      setProgress(null)
+      setInstalling('')
+      setNotice(String(value?.message || ''))
+      if (value && value.ok) refreshItem(item.fullName, { installed: true, disabled: false, installedName: (value.packageName as string | null) || null, hasUpdate: false })
     }).catch((err: unknown) => {
+      setProgress(null)
       setInstalling('')
       setNotice(t('安装出错:', 'Install error: ') + String((err as { message?: string })?.message || err))
     })
@@ -551,15 +617,32 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function doInstallSub(choice: { owner: string; repo: string; packages: MarketSubpackage[] }, sub: MarketSubpackage): void {
     setInstalling(choice.owner + '/' + choice.repo + '/' + sub.dir)
+    setProgress({ pct: 2, message: t('正在准备安装…', 'Preparing install…') })
     void pm.installPlugin(choice.owner, choice.repo, sub.dir).then((res) => {
-      setInstalling('')
       const value = res.ok ? res.value : null
-      setNotice(res.ok ? String(value?.message || (value?.ok ? t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.') : t('安装失败', 'Install failed'))) : res.error.message)
-      if (res.ok && value?.ok) {
+      if (!res.ok) { setProgress(null); setInstalling(''); setNotice(res.error.message); return }
+      const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
+      if (taskId) {
+        pollTask(taskId, (result) => {
+          if (result && result.ok) {
+            setSubChoices(null)
+            setNotice(String(result.message || t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.')))
+            refreshItem(choice.owner + '/' + choice.repo, { installed: true, disabled: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+          } else {
+            setNotice(String((result && result.message) || t('安装失败', 'Install failed')))
+          }
+        })
+        return
+      }
+      setProgress(null)
+      setInstalling('')
+      setNotice(String(value?.message || ''))
+      if (value && value.ok) {
         setSubChoices(null)
-        refreshItem(choice.owner + '/' + choice.repo, { installed: true, installedName: (value.packageName as string | null) || null, hasUpdate: false })
+        refreshItem(choice.owner + '/' + choice.repo, { installed: true, disabled: false, installedName: (value.packageName as string | null) || null, hasUpdate: false })
       }
     }).catch((err: unknown) => {
+      setProgress(null)
       setInstalling('')
       setNotice(String((err as { message?: string })?.message || err))
     })
@@ -567,12 +650,28 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function doUpdate(item: MarketItem): void {
     setInstalling(item.fullName)
+    setProgress({ pct: 2, message: t('正在准备更新…', 'Preparing update…') })
     void pm.update(item.owner, item.name, '').then((res) => {
-      setInstalling('')
       const value = res.ok ? res.value : null
-      setNotice(res.ok ? String(value?.message || '') : res.error.message)
-      if (res.ok && value?.ok) refreshItem(item.fullName, { hasUpdate: false, installedVersion: value.version as string | null, latestVersion: value.version as string | null })
+      if (!res.ok) { setProgress(null); setInstalling(''); setNotice(res.error.message); return }
+      const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
+      if (taskId) {
+        pollTask(taskId, (result) => {
+          if (result && result.ok) {
+            setNotice(String(result.message || t('✅ 已更新!重启 dsh 后生效。', '✅ Updated! Restart dsh to activate.')))
+            refreshItem(item.fullName, { hasUpdate: false, installedVersion: (result.version as string | null) || null, latestVersion: (result.version as string | null) || null })
+          } else {
+            setNotice(String((result && result.message) || t('更新失败', 'Update failed')))
+          }
+        })
+        return
+      }
+      setProgress(null)
+      setInstalling('')
+      setNotice(String(value?.message || ''))
+      if (value && value.ok) refreshItem(item.fullName, { hasUpdate: false, installedVersion: (value.version as string | null) || null, latestVersion: (value.version as string | null) || null })
     }).catch((err: unknown) => {
+      setProgress(null)
       setInstalling('')
       setNotice(String((err as { message?: string })?.message || err))
     })
@@ -614,15 +713,32 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     const name = item.installedName
     if (!name) return
     setInstalling(item.fullName)
+    setProgress({ pct: 2, message: t('正在准备卸载…', 'Preparing uninstall…') })
     void pm.uninstall(name).then((res) => {
-      setInstalling('')
       const value = res.ok ? res.value : null
-      setNotice(res.ok ? String(value?.message || '') : res.error.message)
-      if (res.ok && value?.ok) {
+      if (!res.ok) { setProgress(null); setInstalling(''); setNotice(res.error.message); return }
+      const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
+      if (taskId) {
+        pollTask(taskId, (result) => {
+          if (result && result.ok) {
+            setNotice(String(result.message || t('已卸载', 'Uninstalled')))
+            refreshItem(item.fullName, { installed: false, disabled: false, installedName: null, hasUpdate: false, installedVersion: null, latestVersion: null })
+            setDetail(null)
+          } else {
+            setNotice(String((result && result.message) || t('卸载失败', 'Uninstall failed')))
+          }
+        })
+        return
+      }
+      setProgress(null)
+      setInstalling('')
+      setNotice(String(value?.message || ''))
+      if (value && value.ok) {
         refreshItem(item.fullName, { installed: false, disabled: false, installedName: null, hasUpdate: false, installedVersion: null, latestVersion: null })
         setDetail(null)
       }
     }).catch((err: unknown) => {
+      setProgress(null)
       setInstalling('')
       setNotice(String((err as { message?: string })?.message || err))
     })
@@ -679,6 +795,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <button className="zat-btn" onClick={() => setDetail(null)}>{t('← 返回市场', '← Back')}</button>
           <span className="zat-title">{detail.name}</span>
         </div>
+        {progress && (
+          <div className="zat-progress">
+            <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
+            <div className="zat-ptext">⏳ {progress.message}</div>
+          </div>
+        )}
         <div className="zat-detail">
           <div className="zat-dcover"><img src={detail.cover} onError={(e) => { e.currentTarget.style.display = 'none' }} alt={detail.name} /></div>
           <div className="zat-dtitle">{detail.name}</div>
@@ -812,6 +934,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
+      {progress && (
+        <div className="zat-progress">
+          <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
+          <div className="zat-ptext">⏳ {progress.message}</div>
+        </div>
+      )}
       {showLegend && (
         <div className="zat-legend">
           <span className="zat-lghead">{t('标签说明', 'Badge guide')}:</span>

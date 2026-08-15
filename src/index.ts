@@ -42,6 +42,17 @@ function isMarketishName(name: string): boolean {
   return /(?:plugin|dsh|harness)[-_ .]*(?:market|manager)|(?:market|manager)[-_ .]*(?:plugin|dsh|harness)/i.test(String(name))
 }
 
+/**
+ * Behavior-based market detection: plugin-management machinery in the host
+ * half (pnpm / dsh plugin / GitHub plugin search) plus a market-style UI in
+ * the client half. Names are irrelevant — only what the code does.
+ */
+function isMarketPluginText(hostText: string, clientText: string): boolean {
+  const machinery = /pnpm\s+(?:add|remove|install)|dsh\s+plugin|search\/repositories|topic:dsh-plugin|api\.github\.com/.test(hostText || '')
+  const marketUi = /plugin\s*market|marketplace|插件市场|插件商店/i.test(clientText || '') && /slots\.register|settings\./.test(clientText || '')
+  return machinery && marketUi
+}
+
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
 interface CollectedStream {
@@ -233,8 +244,8 @@ export class ZatMarketGateway extends TypertRemoteService {
     return IS_WIN ? 'C:\\' : '/'
   }
 
-  /** Run one shell command line on the host platform. */
-  private async runShell(command: string, cwd?: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+  /** Spawn one shell command line; returns the live handle for streaming reads. */
+  private async spawnShell(command: string, cwd?: string): Promise<SpawnHandle> {
     let argv: string[]
     if (IS_WIN) {
       let exe = 'powershell.exe'
@@ -245,12 +256,17 @@ export class ZatMarketGateway extends TypertRemoteService {
       try { sh = await this.subprocess.resolveExecutable('sh') } catch { /* keep fallback */ }
       argv = [sh, '-c', command]
     }
-    const handle = this.subprocess.spawn({
+    return this.subprocess.spawn({
       argv,
       cwd: cwd || this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 8 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
       graceMs: 120000,
     })
+  }
+
+  /** Run one shell command line on the host platform. */
+  private async runShell(command: string, cwd?: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+    const handle = await this.spawnShell(command, cwd)
     const outcome = await handle.done
     let stdout = ''
     let stderr = ''
@@ -393,6 +409,127 @@ export class ZatMarketGateway extends TypertRemoteService {
     }
   }
 
+  // ── background install tasks (progress reporting) ──────────────────────
+
+  private tasks = new Map<string, { step: string; message: string; progress: number; done: boolean; ok?: boolean; result?: JsonObject }>()
+  private taskSeq = 0
+
+  @Remote('taskStatus')
+  async taskStatus(taskId: string): Promise<JsonObject> {
+    const t = this.tasks.get(String(taskId || ''))
+    if (!t) return { ok: false, message: 'task not found' }
+    return { ok: true, task: { step: t.step, message: t.message, progress: t.progress, done: t.done, ok: t.ok, result: t.result } }
+  }
+
+  private setTaskStep(id: string, step: string, message: string): void {
+    const t = this.tasks.get(id)
+    if (t) { t.step = step; t.message = message }
+  }
+
+  private setTaskProgress(id: string, pct: number, message: string): void {
+    const t = this.tasks.get(id)
+    if (t) {
+      t.progress = Math.max(1, Math.min(99, Math.round(pct)))
+      t.message = message
+    }
+  }
+
+  private finishTask(id: string, result: JsonObject): void {
+    const t = this.tasks.get(id)
+    if (t) { t.done = true; t.progress = 100; t.ok = Boolean(result.ok); t.result = result }
+    // GC: drop finished tasks after 10 minutes.
+    setTimeout(() => { this.tasks.delete(id) }, 10 * 60 * 1000)
+  }
+
+  private launchTask(work: (id: string) => Promise<JsonObject>): string {
+    const id = 'task-' + (++this.taskSeq)
+    this.tasks.set(id, { step: 'start', message: '准备中…', progress: 1, done: false })
+    void work(id).then((result) => this.finishTask(id, result)).catch((err: unknown) => {
+      this.finishTask(id, { ok: false, message: String((err as { message?: string })?.message || err) })
+    })
+    return id
+  }
+
+  // ── functional market-plugin detection (code signatures, not a name list) ──
+
+  /** Does this package's own code do plugin-management work? */
+  private marketishCache = new Map<string, boolean>()
+
+  private async scanLocalMarketish(name: string): Promise<boolean> {
+    const hit = this.marketishCache.get(name)
+    if (hit !== undefined) return hit
+    let result = false
+    try {
+      const dir = await this.getProfileDir()
+      const pkgPath = join(dir, 'node_modules', name, 'package.json')
+      const meta = JSON.parse(readFileSync(pkgPath, 'utf8')) as { main?: string; exports?: Record<string, string | { default?: string }>; dsh?: { bundle?: { patch?: string } } }
+      const candidates = [meta.main]
+      const exp = meta.exports || {}
+      for (const v of Object.values(exp)) {
+        if (typeof v === 'string') candidates.push(v)
+        else if (v && typeof v === 'object' && typeof v.default === 'string') candidates.push(v.default)
+      }
+      candidates.push('lib/host.js', 'lib/index.js', 'dist/index.js', 'lib/client.js', 'dist/client.js')
+      let hostText = ''
+      let clientText = ''
+      for (const rel of candidates) {
+        if (!rel || rel.includes('*')) continue
+        try {
+          const text = readFileSync(join(dir, 'node_modules', name, rel), 'utf8')
+          if (/client/i.test(rel)) { clientText += '\n' + text } else { hostText += '\n' + text }
+        } catch { /* next */ }
+      }
+      if (meta.dsh?.bundle?.patch) {
+        try { hostText += '\n' + readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8') } catch { /* skip */ }
+      }
+      result = isMarketPluginText(hostText, clientText)
+    } catch { result = false }
+    this.marketishCache.set(name, result)
+    return result
+  }
+
+  /** Deep scan of a candidate repo's files (network) — used before pnpm runs. */
+  private async analyzeMarketishCandidate(owner: string, repo: string, subdir?: string): Promise<boolean> {
+    const base = subdir ? `${subdir}/` : ''
+    const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
+    if (pkgRes.status !== 200) return isMarketishName(repo)
+    let meta: { main?: string; exports?: Record<string, string | { default?: string }>; dsh?: { bundle?: { patch?: string } } } = {}
+    try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return isMarketishName(repo) }
+    const candidates = [meta.main]
+    for (const v of Object.values(meta.exports || {})) {
+      if (typeof v === 'string') candidates.push(v)
+      else if (v && typeof v === 'object' && typeof v.default === 'string') candidates.push(v.default)
+    }
+    candidates.push('lib/host.js', 'lib/index.js', 'dist/index.js', 'lib/client.js', 'dist/client.js')
+    let hostText = ''
+    let clientText = ''
+    for (const rel of [...new Set(candidates)]) {
+      if (!rel || rel.includes('*') || rel.startsWith('http')) continue
+      const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${rel}`)
+      if (r.status === 200) {
+        if (/client/i.test(rel)) { clientText += '\n' + r.body } else { hostText += '\n' + r.body }
+      }
+    }
+    if (meta.dsh?.bundle?.patch) {
+      const pr = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${meta.dsh.bundle.patch}`)
+      if (pr.status === 200) hostText += '\n' + pr.body
+    }
+    return isMarketPluginText(hostText, clientText) || isMarketishName(repo)
+  }
+
+  private async anyInstalledMarketish(): Promise<string | null> {
+    try {
+      const p = await this.readProfile()
+      const inst = this.installedMap(p)
+      for (const rec of Object.values(inst)) {
+        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) {
+          return rec.name
+        }
+      }
+    } catch { /* best effort */ }
+    return null
+  }
+
   /**
    * Roots where a module may actually live: the profile's own node_modules,
    * the `profiles/node_modules` installation fallback (where DSH's own
@@ -531,12 +668,18 @@ export class ZatMarketGateway extends TypertRemoteService {
   /**
    * Run a pnpm command with the user's proxy inherited (Windows reads the
    * system proxy from the registry and exports it; Linux inherits HTTP_PROXY
-   * from the environment naturally), then retry through the gh-proxy mirror
-   * when the direct attempt fails. The mirror retry rewrites github.com URLs
-   * onto gh-proxy.com through per-process GIT_CONFIG_* variables, touching
-   * no global git configuration.
+   * from the environment naturally). When direct GitHub is known to be down
+   * (this.directDown), the mirror rewrite is applied from the start so users
+   * without a VPN do not burn a doomed direct attempt; otherwise the mirror
+   * retry runs only after the direct attempt fails. The mirror rewrite maps
+   * github.com URLs onto gh-proxy.com through per-process GIT_CONFIG_*
+   * variables, touching no global git configuration.
+   * When onProgress is given, stdout is streamed to it while pnpm runs.
    */
-  private async pnpmShell(command: string, dir: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+  private async pnpmShell(command: string, dir: string, onProgress?: (accumulatedStdout: string) => void): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+    const mirrorWin = "$env:GIT_CONFIG_COUNT=1; $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; $env:GIT_CONFIG_VALUE_0='https://github.com/';"
+    const mirrorLin = "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; export GIT_CONFIG_VALUE_0='https://github.com/';"
+    let full: string
     if (IS_WIN) {
       const proxySetup = [
         "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue;",
@@ -547,26 +690,36 @@ export class ZatMarketGateway extends TypertRemoteService {
         '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
         '};',
       ].join(' ')
-      const mirrorRetry = [
-        command + ';',
-        'if ($LASTEXITCODE -ne 0) {',
-        '  $env:GIT_CONFIG_COUNT=1;',
-        "  $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
-        "  $env:GIT_CONFIG_VALUE_0='https://github.com/';",
-        '  ' + command + ';',
-        '}',
-      ].join(' ')
-      return this.runShell(proxySetup + ' ' + mirrorRetry, dir)
+      if (this.directDown) {
+        full = proxySetup + mirrorWin + command
+      } else {
+        full = proxySetup + command + '; if ($LASTEXITCODE -ne 0) { ' + mirrorWin + command + ' }'
+      }
+    } else {
+      full = this.directDown ? mirrorLin + command : command + ' || { ' + mirrorLin + command + ' }'
     }
-    const mirrorRetry = [
-      command + ' || {',
-      "  export GIT_CONFIG_COUNT=1;",
-      "  export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf';",
-      "  export GIT_CONFIG_VALUE_0='https://github.com/';",
-      '  ' + command + ';',
-      '}',
-    ].join(' ')
-    return this.runShell(mirrorRetry, dir)
+    if (!onProgress) return this.runShell(full, dir)
+    // Streaming variant: poll collected stdout while the command runs.
+    const handle = await this.spawnShell(full, dir)
+    let offset = 0
+    let done = false
+    while (!done) {
+      const settled = await Promise.race([
+        handle.done.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 600)),
+      ])
+      if (handle.collected?.stdout) {
+        const text = handle.collected.stdout.readFrom(offset).text || ''
+        if (text) { offset += text.length; onProgress(text) }
+      }
+      done = settled
+    }
+    const outcome = await handle.done
+    let stdout = ''
+    let stderr = ''
+    if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
+    if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
+    return { outcome, stdout, stderr }
   }
 
   private async getHome(): Promise<string> {
@@ -917,7 +1070,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { return null }
   }
 
-  private async addSpec(owner: string, repo: string, subdir?: string): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
+  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
@@ -933,7 +1086,23 @@ export class ZatMarketGateway extends TypertRemoteService {
     const warnings = analysis.warn.length > 0 ? analysis.warn.join('; ') : undefined
     this.invalidateListCache()
     const snap = await this.snapshotProfile(dir)
-    const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
+    if (taskId) {
+      this.setTaskStep(taskId, 'download', '正在下载安装包…')
+      this.setTaskProgress(taskId, 12, '正在下载安装包…(已进行 0 秒)')
+    }
+    const startedAt = Date.now()
+    const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir, taskId ? (text) => {
+      // Surface pnpm's own progress line ("Progress: resolved X, downloaded Y…")
+      const lines = String(text).split(/\r?\n/).filter(Boolean)
+      let counts = ''
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]!
+        if (line.includes('Progress:')) { counts = line.slice(line.indexOf('Progress:')).trim().slice(0, 70); break }
+      }
+      const secs = Math.floor((Date.now() - startedAt) / 1000)
+      const pct = Math.min(82, 12 + secs * 2)
+      this.setTaskProgress(taskId, pct, `正在下载安装包…(已进行 ${secs} 秒)${counts ? ' · ' + counts : ''}`)
+    } : undefined)
     if (pnpmResult.outcome.exitCode !== 0) {
       await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
@@ -945,6 +1114,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
       return { ok: false, packageName: null, message: (errText.slice(0, 2000) || 'pnpm failed') + ' — profile 配置已自动回滚到安装前状态' }
+    }
+    if (taskId) {
+      this.setTaskStep(taskId, 'verify', '下载完成,正在校验并写入启用名单…')
+      this.setTaskProgress(taskId, 87, '下载完成,正在校验并写入启用名单…')
     }
     const after = await this.readProfile()
     const deps = Object.keys((after.dependencies || {}) as Record<string, string>)
@@ -980,6 +1153,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         return { ok: false, packageName: null, message: '安装成功但启用名单写入校验失败,已自动回滚到安装前状态。请重试或手动编辑 profile。' }
       }
       await this.saveLastKnownGood()
+      if (taskId) this.setTaskProgress(taskId, 97, '写入完成,收尾中…')
       return { ok: true, packageName: added, warning: warnings }
     }
     if (missingBundle) {
@@ -1281,6 +1455,9 @@ export class ZatMarketGateway extends TypertRemoteService {
       const r = safeSegment(repo)
       const s = safeSubdir(subdir)
       if (!o || !r || s === null) return { ok: false, message: 'invalid repository name or subdirectory' }
+      // Instant gate — local checks only, blocks within milliseconds.
+      const gate = await this.checkMarketConflict(o, r)
+      if (gate) return { ok: false, packageName: null, message: gate }
       // When no subdir was picked and the root has no package.json, the
       // plugins live in subdirectories: auto-install when there is exactly
       // one, otherwise return the list for the UI to offer a choice.
@@ -1291,20 +1468,33 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (sub.ok && Array.isArray(sub.packages) && sub.packages.length > 0) {
             if (sub.packages.length === 1) {
               const only = sub.packages[0]!
-              const res = await this.addSpec(o, r, only.dir)
-              return res.ok
-                ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
-                : { ok: false, message: res.message }
+              const taskId = this.launchTask(async (id) => {
+                this.setTaskStep(id, 'download', `正在下载安装 ${only.name || o + '/' + r}…(网络慢时可能较久,请稍候)`)
+                const res = await this.addSpec(o, r, only.dir, id)
+                return res.ok
+                  ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+                  : { ok: false, packageName: null, message: res.message }
+              })
+              return { ok: true, taskId }
             }
             return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
           }
           return { ok: false, message: '这个仓库不是可安装的 dsh 插件:里面没有找到插件声明(dsh.bundle)。它可能是一个技能包、工具库或代码仓库(只是打了 dsh-plugin 标签),无法通过市场一键安装。请到该仓库的 GitHub 页面查看它的使用方式。' }
         }
       }
-      const res = await this.addSpec(o, r, s || undefined)
-      return res.ok
-        ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r}${s ? `#path:${s}` : ''} — restart dsh to activate${res.warning ? '. 风险提示:' + res.warning : ''}` }
-        : { ok: false, message: res.message }
+      const taskId = this.launchTask(async (id) => {
+        this.setTaskStep(id, 'check', '正在做安装前检查(冲突/依赖)…')
+        const holder = await this.anyInstalledMarketish()
+        if (holder && await this.analyzeMarketishCandidate(o, r, s || undefined)) {
+          return { ok: false, packageName: null, message: `已拦截:装了市场类插件 ${holder},再装会互相冲突导致 dsh 起不来。想换用请先卸载它。` }
+        }
+        this.setTaskStep(id, 'download', '正在下载安装包…(网络慢时可能较久,请稍候)')
+        const res = await this.addSpec(o, r, s || undefined, id)
+        return res.ok
+          ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+          : { ok: false, packageName: null, message: res.message }
+      })
+      return { ok: true, taskId }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
@@ -1317,11 +1507,17 @@ export class ZatMarketGateway extends TypertRemoteService {
       const r = safeSegment(repo)
       const s = safeSubdir(subdir)
       if (!o || !r || s === null) return { ok: false, message: 'invalid repository name or subdirectory' }
-      const res = await this.addSpec(o, r, s || undefined)
-      const version = await this.remoteVersion(o, r, s || undefined)
-      return res.ok
-        ? { ok: true, version, message: `updated github:${o}/${r}${s ? `#path:${s}` : ''} to v${version || '?'} — restart dsh to activate${res.warning ? '. 风险提示:' + res.warning : ''}` }
-        : { ok: false, message: res.message }
+      const gate = await this.checkMarketConflict(o, r)
+      if (gate) return { ok: false, message: gate }
+      const taskId = this.launchTask(async (id) => {
+        this.setTaskStep(id, 'download', '正在下载新版本…(网络慢时可能较久,请稍候)')
+        const res = await this.addSpec(o, r, s || undefined, id)
+        const version = await this.remoteVersion(o, r, s || undefined)
+        return res.ok
+          ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+          : { ok: false, message: res.message }
+      })
+      return { ok: true, taskId }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
@@ -1329,31 +1525,42 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   @Remote('uninstall')
   async uninstall(name: string): Promise<JsonObject> {
-    try {
-      const n = safePackageName(name)
-      if (!n) return { ok: false, message: 'invalid package name' }
-      const dir = await this.getProfileDir()
-      this.invalidateListCache()
-      const snap = await this.snapshotProfile(dir)
-      const r = await this.pnpmShell('pnpm remove ' + n, dir)
-      if (r.outcome.exitCode !== 0) {
-        await this.restoreProfile(dir, snap)
-        return { ok: false, message: ((r.stderr || r.stdout || 'pnpm failed').slice(0, 2000)) + ' — profile 配置已自动回滚' }
+    const n = safePackageName(name)
+    if (!n) return { ok: false, message: 'invalid package name' }
+    const taskId = this.launchTask(async (id) => {
+      try {
+        this.setTaskStep(id, 'uninstall', `正在卸载 ${n}…`)
+        this.setTaskProgress(id, 8, `正在卸载 ${n}…`)
+        const dir = await this.getProfileDir()
+        this.invalidateListCache()
+        const snap = await this.snapshotProfile(dir)
+        const startedAt = Date.now()
+        const r = await this.pnpmShell('pnpm remove ' + n, dir, (text) => {
+          const secs = Math.floor((Date.now() - startedAt) / 1000)
+          this.setTaskProgress(id, Math.min(80, 8 + secs * 2), `正在卸载 ${n}…(已进行 ${secs} 秒)`)
+        })
+        if (r.outcome.exitCode !== 0) {
+          await this.restoreProfile(dir, snap)
+          return { ok: false, message: ((r.stderr || r.stdout || 'pnpm failed').slice(0, 2000)) + ' — profile 配置已自动回滚' }
+        }
+        this.setTaskProgress(id, 87, '卸载完成,正在清理启用名单…')
+        const after = await this.readProfile()
+        const profile = ((after.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
+        const bundles = Array.isArray(profile.bundles) ? (profile.bundles as string[]).filter((b) => b !== n) : []
+        if (bundles.length !== ((profile.bundles as string[] | undefined) || []).length) {
+          after.dsh = after.dsh || {}
+          ;(after.dsh as JsonObject).profile = (after.dsh as JsonObject).profile || {}
+          ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
+          await this.writeProfile(after)
+        }
+        await this.saveLastKnownGood()
+        this.setTaskProgress(id, 97, '清理完成,收尾中…')
+        return { ok: true, message: `已卸载 ${n} — 重启 dsh 后不再加载` }
+      } catch (err) {
+        return { ok: false, message: String((err as { message?: string })?.message || err) }
       }
-      const after = await this.readProfile()
-      const profile = ((after.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
-      const bundles = Array.isArray(profile.bundles) ? (profile.bundles as string[]).filter((b) => b !== n) : []
-      if (bundles.length !== ((profile.bundles as string[] | undefined) || []).length) {
-        after.dsh = after.dsh || {}
-        ;(after.dsh as JsonObject).profile = (after.dsh as JsonObject).profile || {}
-        ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
-        await this.writeProfile(after)
-      }
-      await this.saveLastKnownGood()
-      return { ok: true, message: `已卸载 ${n} — 重启 dsh 后不再加载` }
-    } catch (err) {
-      return { ok: false, message: String((err as { message?: string })?.message || err) }
-    }
+    })
+    return { ok: true, taskId }
   }
 
   /** Enable or disable one installed plugin (add/remove its bundle entry). */
