@@ -266,7 +266,6 @@ function injectCss(): () => void {
 
 const CATEGORIES: Array<{ label: string; en: string }> = [
   { label: '全部', en: 'All' },
-  { label: '可安装', en: 'Installable' },
   { label: '皮肤 / 主题', en: 'Theme' },
   { label: '工具 / 终端', en: 'Tools' },
   { label: '浏览器 / 自动化', en: 'Browser' },
@@ -310,7 +309,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState('stars')
   const [category, setCategory] = useState('全部')
-  const [instFilter, setInstFilter] = useState<'all' | 'installed' | 'uninstalled'>('all')
+  const [instFilter, setInstFilter] = useState<'all' | 'installed' | 'uninstalled' | 'installable'>('all')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -590,7 +589,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const filtered = items ? items.filter((it) => {
     if (instFilter === 'installed' && !(it.installed || it.disabled)) return false
     if (instFilter === 'uninstalled' && (it.installed || it.disabled)) return false
-    if (category === '可安装' && it.kind !== 'plugin' && it.kind !== 'multi') return false
+    if (instFilter === 'installable' && it.kind !== 'plugin' && it.kind !== 'multi') return false
     return true
   }) : []
 
@@ -697,6 +696,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <option value="all">{t('全部插件', 'All')}</option>
           <option value="installed">{t('已安装', 'Installed')}</option>
           <option value="uninstalled">{t('未安装', 'Not installed')}</option>
+          <option value="installable">{t('可安装', 'Installable')}</option>
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
