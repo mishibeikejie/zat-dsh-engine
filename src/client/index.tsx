@@ -209,7 +209,14 @@ function isZh(id: string): boolean {
 // ── styles ──────────────────────────────────────────────────────────────
 
 const css = `
-.zat-panel{display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;color:var(--color-fg1,#e6e9ef);font-family:inherit}
+.zat-panel{display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;color:var(--color-fg1,#e6e9ef);font-family:inherit;
+--color-bg1:var(--dsw-alias-bg-base,transparent);
+--color-bg2:var(--dsw-alias-bg-layer-1,#151a24);
+--color-bg3:var(--dsw-alias-bg-layer-2,#232a3a);
+--color-fg1:var(--dsw-alias-label-primary,#e6e9ef);
+--color-fg2:var(--dsw-alias-label-secondary,#dbe2ee);
+--color-fg3:var(--dsw-alias-label-tertiary,#7c8698);
+--color-border:var(--dsw-alias-border-l1,#ffffff14)}
 .zat-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;background:var(--color-bg1,#121826);padding:4px 2px}
 .zat-title{font-size:15px;font-weight:700;color:var(--color-fg1,#eef1f7);white-space:nowrap}
 .zat-title small{font-size:11px;color:var(--color-fg3,#7c8698);font-weight:400;margin-left:6px}
@@ -1209,7 +1216,7 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
 
 // ── session manager panel (settings.section, right under Agent Presets) ──
 
-function SessionManagerPanel({ pm, locale }: { pm: MarketRemote['pluginMarket']; locale: LocaleFace }) {
+function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: () => void }) {
   const [zh, setZh] = useState(true)
   const [sessions, setSessions] = useState<SessionItem[] | null>(null)
   const [error, setError] = useState('')
@@ -1258,7 +1265,10 @@ function SessionManagerPanel({ pm, locale }: { pm: MarketRemote['pluginMarket'];
     void pm.deleteSession(item.id).then((res) => {
       setBusy('')
       setNotice(res.ok ? String(res.value.message || '') : res.error.message)
-      if (res.ok && res.value.ok) reload()
+      if (res.ok && res.value.ok) {
+        reload()
+        refreshSessions()
+      }
     }).catch((err: unknown) => {
       setBusy('')
       setNotice(String((err as { message?: string })?.message || err))
@@ -1332,6 +1342,10 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   ))
 
   // Conversation management: its own settings section, right below Agent Presets.
+  const refreshSessions = (): void => {
+    const svc = ctx.get('sessions') as { refresh(): Promise<void> } | undefined
+    if (svc) void svc.refresh().catch(() => { /* best effort — the panel list is still correct */ })
+  }
   slots.inject('settings.section', () => slots.register(
     {
       name: 'settings.section',
@@ -1342,7 +1356,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
         const zh = snap?.active ? isZh(String(snap.active)) : true
         return zh ? '🗑 对话管理' : '🗑 Sessions'
       },
-      inject: (): { pm: MarketRemote['pluginMarket']; locale: LocaleFace } => ({ pm, locale }),
+      inject: (): { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: () => void } => ({ pm, locale, refreshSessions }),
     },
     SessionManagerPanel,
   ))
