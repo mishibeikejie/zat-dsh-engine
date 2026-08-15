@@ -1050,7 +1050,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         ? (
             <div className="zat-legend">
               <span className="zat-lghead">↑ {t('更新 v', 'Update v')}{selfUpdate.latestVersion || ''}{t(' 内容:', ' — what changed:')}</span>
-              {selfUpdate.changes.map((c) => <span key={c} className="zat-lgi">· {c}</span>)}
+              <span className="zat-lgi">{selfUpdate.changes.slice(0, 3).map((c) => c.replace(/[（(][^)）]*[)）]/g, '')).join('、')}{selfUpdate.changes.length > 3 ? t(' 等', ' …') : ''}</span>
             </div>
           )
         : (
