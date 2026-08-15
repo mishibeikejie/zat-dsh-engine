@@ -14,7 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 import bundledKinds from '../data/kinds.json'
@@ -1649,6 +1649,111 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
     })
     return { ok: true, taskId }
+  }
+
+  // ── conversation management (delete sessions) ──────────────────────────
+
+  /** Soft faces: the session panel degrades gracefully where services differ. */
+  private get persistenceFace(): { list(): Promise<Array<{ id: string; createdAt: number; origin?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined {
+    return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string; createdAt: number; origin?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
+  }
+
+  private get workspaceRegistryFace(): { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined {
+    return this.ctx.get('workspaceRegistry') as unknown as { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined
+  }
+
+  private get agentsFace(): { get(id: string): { status: string } | undefined } | undefined {
+    return this.ctx.get('agents') as unknown as { get(id: string): { status: string } | undefined } | undefined
+  }
+
+  private get storageDomainFace(): { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown> } } | undefined } | undefined {
+    return this.ctx.get('storageDomain') as unknown as { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown> } } | undefined } | undefined
+  }
+
+  @Remote('listSessions')
+  async listSessions(): Promise<JsonObject> {
+    try {
+      const persistence = this.persistenceFace
+      if (!persistence) return { ok: false, message: '当前环境不支持会话管理' }
+      const registry = this.workspaceRegistryFace
+      const agents = this.agentsFace
+      const headers = await persistence.list()
+      const archived = registry ? registry.archivedSessionIds : []
+      const workspaces = registry ? registry.list() : []
+      const sessions: JsonObject[] = []
+      for (const h of headers) {
+        const live = Boolean(agents && agents.get(h.id) !== undefined && agents.get(h.id)!.status === 'running')
+        sessions.push({
+          id: h.id,
+          createdAt: h.createdAt || 0,
+          live,
+          subagent: Boolean(h.origin === 'subagent'),
+          archived: archived.includes(h.id),
+          inWorkspace: workspaces.some((w) => (w.sessionIds as readonly string[]).includes(h.id)),
+        })
+      }
+      sessions.sort((a, b) => Number(b.createdAt) - Number(a.createdAt))
+      return { ok: true, sessions }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  @Remote('deleteSession')
+  async deleteSession(sessionId: string): Promise<JsonObject> {
+    try {
+      const id = String(sessionId || '').trim()
+      if (!/^[\w-]+$/.test(id)) return { ok: false, message: 'invalid session id' }
+      const persistence = this.persistenceFace
+      if (!persistence) return { ok: false, message: '当前环境不支持删除会话' }
+      const agents = this.agentsFace
+      if (agents) {
+        const live = agents.get(id)
+        if (live !== undefined && live.status === 'running') {
+          return { ok: false, message: '这个会话正在运行,不能删除。等它跑完再删。' }
+        }
+      }
+      const header = (await persistence.list()).find((c) => c.id === id)
+      const registry = this.workspaceRegistryFace
+      if (header === undefined) {
+        const accounted = registry !== undefined && (registry.archivedSessionIds.includes(id)
+          || registry.list().some((w) => (w.sessionIds as readonly string[]).includes(id)))
+        if (!accounted) return { ok: false, message: '没有找到这个会话' }
+        await this.forgetSessionCompat(registry, id)
+        return { ok: true, message: `已清理会话 ${id} 的记账记录` }
+      }
+      if (header.origin === 'subagent') return { ok: false, message: '子代理会话不能直接删除' }
+      const location = persistence.locate(header)
+      if (location === undefined) return { ok: false, message: '这个会话没有可删除的本地文件' }
+      try {
+        rmSync(dirname(location.path), { recursive: true, force: true })
+      } catch (err) {
+        return { ok: false, message: `删除会话文件失败:${(err as { message?: string })?.message || String(err)}` }
+      }
+      let warning = ''
+      if (registry !== undefined) warning = await this.forgetSessionCompat(registry, id)
+      try {
+        const domain = this.storageDomainFace?.get('session_projcache')
+        if (domain) await domain.table('sessions').delete(id)
+      } catch { /* a stale cache row is harmless */ }
+      return { ok: true, message: `已删除会话 ${id}${warning ? '。' + warning : ''}` }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  /** Forget a session everywhere: patched dsh has forgetSession; stock dsh falls back to per-workspace detach. */
+  private async forgetSessionCompat(registry: { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; forgetSession?: (id: string) => Promise<void> }, id: string): Promise<string> {
+    if (typeof registry.forgetSession === 'function') {
+      await registry.forgetSession(id)
+      return ''
+    }
+    for (const w of registry.list()) {
+      if ((w.sessionIds as readonly string[]).includes(id) && typeof w.detachSession === 'function') {
+        try { await w.detachSession(id) } catch { /* keep going */ }
+      }
+    }
+    return '此版本 dsh 缺少清理归档记录的方法,归档集合里可能残留一条记录(不影响使用)'
   }
 
   /**

@@ -92,6 +92,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     'pluginMarket/taskStatus': (taskId: string) => Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     'pluginMarket/installedList': () => Promise<RemoteResult<MarketListResult>>
+    'pluginMarket/listSessions': () => Promise<RemoteResult<MarketJson & { sessions?: SessionItem[] }>>
+    'pluginMarket/deleteSession': (sessionId: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -105,6 +107,15 @@ interface MarketSubpackage {
   dir: string
   name: string
   version: string
+}
+
+interface SessionItem {
+  id: string
+  createdAt: number
+  live: boolean
+  subagent: boolean
+  archived: boolean
+  inWorkspace: boolean
 }
 
 interface MarketRemote extends TypertClientRemote {
@@ -123,6 +134,8 @@ interface MarketRemote extends TypertClientRemote {
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     taskStatus(taskId: string): Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     installedList(): Promise<RemoteResult<MarketListResult>>
+    listSessions(): Promise<RemoteResult<MarketJson & { sessions?: SessionItem[] }>>
+    deleteSession(sessionId: string): Promise<RemoteResult<MarketJson>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -168,6 +181,8 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('healthCheck', []),
   desc('taskStatus', ['taskId']),
   desc('installedList', []),
+  desc('listSessions', []),
+  desc('deleteSession', ['sessionId']),
   desc('star', ['owner', 'repo']),
   desc('starredList', []),
   desc('setToken', ['token']),
@@ -265,6 +280,12 @@ const css = `
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
 .zat-progress{margin:2px 0}
 .zat-cardprogress{margin-top:8px}
+.zat-srow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px}
+.zat-smeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.zat-sid{font-size:12px;color:var(--color-fg2,#c3ccdb);font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+.zat-stime{font-size:11.5px;color:var(--color-fg3,#7c8698)}
+.zat-tag{font-size:10.5px;padding:1px 8px;border-radius:10px;background:var(--color-bg3,#232a3a);color:var(--color-fg2,#a8b2c4)}
+.zat-tag-live{background:rgba(52,211,153,.15);color:#34d399}
 .zat-pbar{height:8px;border-radius:6px;background:var(--color-bg3,#232a3a);overflow:hidden}
 .zat-pfill{height:100%;background:linear-gradient(90deg,#3d6bff,#7a4dff);border-radius:6px;transition:width .5s}
 .zat-ptext{font-size:11.5px;color:var(--color-fg2,#a8b2c4);margin-top:3px;line-height:1.5}
@@ -1177,6 +1198,99 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
   )
 }
 
+// ── session manager panel (settings.section, right under Agent Presets) ──
+
+function SessionManagerPanel({ pm, locale }: { pm: MarketRemote['pluginMarket']; locale: LocaleFace }) {
+  const [zh, setZh] = useState(true)
+  const [sessions, setSessions] = useState<SessionItem[] | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const [notice, setNotice] = useState('')
+
+  useEffect(() => {
+    const off = locale.subscribe(() => {
+      const snap = locale.getLocale()
+      setZh(snap?.active ? isZh(String(snap.active)) : true)
+    })
+    return () => { off?.() }
+  }, [locale])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 5500)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  const t = (zhText: string, enText: string): string => (zh ? zhText : enText)
+
+  function reload(): void {
+    setError('')
+    void pm.listSessions().then((res) => {
+      if (!res.ok || !res.value.ok) {
+        setError(res.ok ? String(res.value.message || '') : res.error.message)
+        setSessions(null)
+        return
+      }
+      setSessions((Array.isArray(res.value.sessions) ? res.value.sessions : []) as SessionItem[])
+    }).catch((err: unknown) => {
+      setError(String((err as { message?: string })?.message || err))
+      setSessions(null)
+    })
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { reload() }, [])
+
+  function remove(item: SessionItem): void {
+    if (item.live) { setNotice(t('运行中的会话不能删除,等它跑完再删', 'A running session cannot be deleted — wait for it to finish')); return }
+    if (item.subagent) { setNotice(t('子代理会话不能直接删除', 'Subagent sessions cannot be deleted directly')); return }
+    if (!window.confirm(t(`确定永久删除会话 ${item.id}?此操作不可恢复。`, `Delete session ${item.id} permanently? This cannot be undone.`))) return
+    setBusy(item.id)
+    void pm.deleteSession(item.id).then((res) => {
+      setBusy('')
+      setNotice(res.ok ? String(res.value.message || '') : res.error.message)
+      if (res.ok && res.value.ok) reload()
+    }).catch((err: unknown) => {
+      setBusy('')
+      setNotice(String((err as { message?: string })?.message || err))
+    })
+  }
+
+  return (
+    <div className="zat-panel">
+      <div className="zat-bar">
+        <span className="zat-title">
+          {t('对话管理', 'Sessions')}
+          <small>{sessions ? `${t('共 ', '')}${sessions.length}${t(' 个会话', '')}` : ''}</small>
+        </span>
+        <button className="zat-btn" onClick={reload}>{t('刷新', 'Refresh')}</button>
+      </div>
+      {notice && <div className="zat-notice">{notice}</div>}
+      {error && <div className="zat-status zat-error">⚠ {error}</div>}
+      {sessions === null && !error && <div className="zat-status">{t('正在读取会话列表…', 'Loading sessions…')}</div>}
+      {sessions !== null && sessions.length === 0 && <div className="zat-status">{t('没有会话', 'No sessions')}</div>}
+      {sessions !== null && sessions.length > 0 && (
+        <div className="zat-detail">
+          {sessions.map((it) => (
+            <div key={it.id} className="zat-srow">
+              <span className="zat-smeta">
+                <span className="zat-sid" title={it.id}>{it.id}</span>
+                <span className="zat-stime">{new Date(Number(it.createdAt)).toLocaleString()}</span>
+                {it.live && <span className="zat-tag zat-tag-live">{t('运行中', 'Running')}</span>}
+                {it.subagent && <span className="zat-tag">{t('子代理', 'Subagent')}</span>}
+                {it.archived && <span className="zat-tag">{t('已归档', 'Archived')}</span>}
+              </span>
+              <button className="zat-btn zat-danger" onClick={() => remove(it)} disabled={!!busy || it.live || it.subagent}>
+                {busy === it.id ? t('删除中…', 'Deleting…') : t('删除', 'Delete')}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── plugin ──────────────────────────────────────────────────────────────
 
 export const inject = ['slots', 'locale', 'remote']
@@ -1205,6 +1319,22 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       inject: (): MarketPanelProps => ({ pm, locale }),
     },
     MarketPanel,
+  ))
+
+  // Conversation management: its own settings section, right below Agent Presets.
+  slots.inject('settings.section', () => slots.register(
+    {
+      name: 'settings.section',
+      id: 'session-manager',
+      order: 21,
+      label: () => {
+        const snap = locale.getLocale()
+        const zh = snap?.active ? isZh(String(snap.active)) : true
+        return zh ? '🗑 对话管理' : '🗑 Sessions'
+      },
+      inject: (): { pm: MarketRemote['pluginMarket']; locale: LocaleFace } => ({ pm, locale }),
+    },
+    SessionManagerPanel,
   ))
 
   return async () => { await dispose() }
