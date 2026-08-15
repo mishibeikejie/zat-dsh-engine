@@ -53,6 +53,17 @@ function isMarketPluginText(hostText: string, clientText: string): boolean {
   return machinery && marketUi
 }
 
+/** Names a plugin REGISTERS: host services/provides, client slot registrations. */
+function extractRegisteredNames(text: string, side: 'host' | 'client'): Set<string> {
+  const names = new Set<string>()
+  const re = side === 'host'
+    ? /(?:provide|service)\s*\(\s*['"]([^'"]{3,})['"]/g
+    : /register\s*\(\s*['"]([^'"]{3,})['"]/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(String(text || ''))) !== null) names.add(m[1]!)
+  return names
+}
+
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
 interface CollectedStream {
@@ -390,11 +401,14 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const p = await this.readProfile()
       const inst = this.installedMap(p)
+      // Already installed? Then this is a reinstall / update of an existing
+      // pair member — updating it must not be blocked (the pair is not new).
+      for (const rec of Object.values(inst)) {
+        if ((rec.owner + '/' + rec.repo).toLowerCase() === candidateRepo) return null
+        if (candidatePkg && rec.name === candidatePkg) return null
+      }
       const conflicts: string[] = []
       for (const rec of Object.values(inst)) {
-        // Reinstall / update of the same plugin is not a conflict.
-        if (rec.name === candidatePkg) continue
-        if ((rec.owner + '/' + rec.repo).toLowerCase() === candidateRepo) continue
         const isMarket = KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined
           || Object.values(KNOWN_MARKET_REPOS).includes(rec.name)
           || isMarketishName(rec.name)
@@ -418,7 +432,12 @@ export class ZatMarketGateway extends TypertRemoteService {
   async taskStatus(taskId: string): Promise<JsonObject> {
     const t = this.tasks.get(String(taskId || ''))
     if (!t) return { ok: false, message: 'task not found' }
-    return { ok: true, task: { step: t.step, message: t.message, progress: t.progress, done: t.done, ok: t.ok, result: t.result } }
+    // Build explicitly: undefined property VALUES are rejected by the wire
+    // boundary, so optional fields must be omitted until they exist.
+    const task: JsonObject = { step: t.step, message: t.message, progress: t.progress, done: t.done }
+    if (t.ok !== undefined) task.ok = t.ok
+    if (t.result !== undefined) task.result = t.result
+    return { ok: true, task }
   }
 
   private setTaskStep(id: string, step: string, message: string): void {
@@ -454,11 +473,14 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   /** Does this package's own code do plugin-management work? */
   private marketishCache = new Map<string, boolean>()
+  private localTextsCache = new Map<string, { hostText: string; clientText: string }>()
 
-  private async scanLocalMarketish(name: string): Promise<boolean> {
-    const hit = this.marketishCache.get(name)
-    if (hit !== undefined) return hit
-    let result = false
+  /** Read an installed plugin's host/client texts once, from its declared entries. */
+  private async readLocalTexts(name: string): Promise<{ hostText: string; clientText: string }> {
+    const hit = this.localTextsCache.get(name)
+    if (hit) return hit
+    let hostText = ''
+    let clientText = ''
     try {
       const dir = await this.getProfileDir()
       const pkgPath = join(dir, 'node_modules', name, 'package.json')
@@ -470,8 +492,6 @@ export class ZatMarketGateway extends TypertRemoteService {
         else if (v && typeof v === 'object' && typeof v.default === 'string') candidates.push(v.default)
       }
       candidates.push('lib/host.js', 'lib/index.js', 'dist/index.js', 'lib/client.js', 'dist/client.js')
-      let hostText = ''
-      let clientText = ''
       for (const rel of candidates) {
         if (!rel || rel.includes('*')) continue
         try {
@@ -482,19 +502,33 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (meta.dsh?.bundle?.patch) {
         try { hostText += '\n' + readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8') } catch { /* skip */ }
       }
-      result = isMarketPluginText(hostText, clientText)
-    } catch { result = false }
+    } catch { /* unreadable */ }
+    const out = { hostText, clientText }
+    this.localTextsCache.set(name, out)
+    return out
+  }
+
+  private async scanLocalMarketish(name: string): Promise<boolean> {
+    const hit = this.marketishCache.get(name)
+    if (hit !== undefined) return hit
+    const texts = await this.readLocalTexts(name)
+    const result = isMarketPluginText(texts.hostText, texts.clientText)
     this.marketishCache.set(name, result)
     return result
   }
 
-  /** Deep scan of a candidate repo's files (network) — used before pnpm runs. */
-  private async analyzeMarketishCandidate(owner: string, repo: string, subdir?: string): Promise<boolean> {
+  private async scanLocalNames(name: string): Promise<{ host: Set<string>; client: Set<string> }> {
+    const texts = await this.readLocalTexts(name)
+    return { host: extractRegisteredNames(texts.hostText, 'host'), client: extractRegisteredNames(texts.clientText, 'client') }
+  }
+
+  /** Fetch a candidate repo's manifest and code files (network, mirror-backed). */
+  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } } | null> {
     const base = subdir ? `${subdir}/` : ''
     const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
-    if (pkgRes.status !== 200) return isMarketishName(repo)
-    let meta: { main?: string; exports?: Record<string, string | { default?: string }>; dsh?: { bundle?: { patch?: string } } } = {}
-    try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return isMarketishName(repo) }
+    if (pkgRes.status !== 200) return null
+    let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
+    try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return null }
     const candidates = [meta.main]
     for (const v of Object.values(meta.exports || {})) {
       if (typeof v === 'string') candidates.push(v)
@@ -514,7 +548,14 @@ export class ZatMarketGateway extends TypertRemoteService {
       const pr = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${meta.dsh.bundle.patch}`)
       if (pr.status === 200) hostText += '\n' + pr.body
     }
-    return isMarketPluginText(hostText, clientText) || isMarketishName(repo)
+    return { hostText, clientText, meta }
+  }
+
+  /** Deep scan of a candidate repo's files (network) — used before pnpm runs. */
+  private async analyzeMarketishCandidate(owner: string, repo: string, subdir?: string): Promise<boolean> {
+    const f = await this.fetchCandidateTexts(owner, repo, subdir)
+    if (!f) return isMarketishName(repo)
+    return isMarketPluginText(f.hostText, f.clientText) || isMarketishName(repo)
   }
 
   private async anyInstalledMarketish(): Promise<string | null> {
@@ -598,34 +639,27 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   /**
    * Pre-install conflict analysis against the candidate repo's manifest and
-   * patch. Hard problems block the install; soft problems become warnings.
+   * code. Hard problems block the install; soft problems become warnings.
    */
   private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[] }> {
     const block: string[] = []
     const warn: string[] = []
-    const base = subdir ? `${subdir}/` : ''
-    const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
-    if (pkgRes.status !== 200) return { block, warn }
-    let meta: { name?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
-    try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return { block, warn } }
+    const f = await this.fetchCandidateTexts(owner, repo, subdir)
+    if (!f) return { block, warn }
+    const meta = f.meta
     // (1) Official packages must be peers, never direct deps — a direct dep
     // installs a second copy and hijacks the official loader rows.
     for (const d of Object.keys(meta.dependencies || {})) {
       if (d.startsWith('@deepseek-ai/')) block.push(`官方包${d}应为peer依赖`)
     }
     // (2) Loader row id collisions with installed bundles.
-    if (meta.dsh?.bundle?.patch) {
-      const patchRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${meta.dsh.bundle.patch}`)
-      if (patchRes.status === 200) {
-        const candIds = extractPatchIds(patchRes.body)
-        const installed = await this.installedPatchIds()
-        for (const id of candIds) {
-          const holder = installed.get(id)
-          if (holder && holder !== meta.name) block.push(`挂载行${id}与${holder}重复`)
-        }
-      }
+    const candIds = extractPatchIds(f.hostText)
+    const installedIds = await this.installedPatchIds()
+    for (const id of candIds) {
+      const holder = installedIds.get(id)
+      if (holder && holder !== meta.name) block.push(`挂载行${id}与${holder}重复`)
     }
-    // (3) Shared-dependency major-version mismatches.
+    // (3) Shared-dependency major-version mismatches (non-official).
     for (const [dep, range] of [...Object.entries(meta.dependencies || {}), ...Object.entries(meta.peerDependencies || {})]) {
       if (dep.startsWith('@deepseek-ai/')) continue
       const installedVer = await this.installedVersionOf(dep)
@@ -633,6 +667,35 @@ export class ZatMarketGateway extends TypertRemoteService {
         warn.push(`依赖 ${dep}:插件要求 ${range},本机已装 v${installedVer},大版本不一致`)
       }
     }
+    // (4) Official-package version compatibility: a plugin built against a
+    // different DSH major than the installed one usually breaks at runtime.
+    for (const [pd, range] of Object.entries(meta.peerDependencies || {})) {
+      if (!pd.startsWith('@deepseek-ai/')) continue
+      const installedVer = await this.installedVersionOf(pd)
+      if (installedVer && simpleMajorConflict(String(range), installedVer)) {
+        warn.push(`官方包 ${pd}:插件要求 ${range},本机是 v${installedVer},大版本不一致可能不兼容`)
+      }
+    }
+    // (5) Registered-name collisions: host service/provide names (fatal),
+    // client slot registration names (warn — may be intentional sharing).
+    const candHost = extractRegisteredNames(f.hostText, 'host')
+    const candClient = extractRegisteredNames(f.clientText, 'client')
+    try {
+      const p = await this.readProfile()
+      const bundles = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
+        ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
+        : []
+      for (const dname of Object.keys((p.dependencies || {}) as Record<string, string>)) {
+        if (!bundles.includes(dname)) continue // disabled plugins do not load
+        const names = await this.scanLocalNames(dname)
+        for (const nm of candHost) {
+          if (names.host.has(nm)) block.push(`服务名${nm}与${dname}重复注册`)
+        }
+        for (const nm of candClient) {
+          if (names.client.has(nm)) warn.push(`界面注册名${nm}与${dname}重复,可能互相覆盖`)
+        }
+      }
+    } catch { /* best effort */ }
     return { block, warn }
   }
 
@@ -1469,6 +1532,11 @@ export class ZatMarketGateway extends TypertRemoteService {
             if (sub.packages.length === 1) {
               const only = sub.packages[0]!
               const taskId = this.launchTask(async (id) => {
+                this.setTaskStep(id, 'check', '正在做安装前检查(冲突/依赖)…')
+                const holder = await this.anyInstalledMarketish()
+                if (holder && await this.analyzeMarketishCandidate(o, r, only.dir)) {
+                  return { ok: false, packageName: null, message: `已拦截:装了市场类插件 ${holder},再装会互相冲突导致 dsh 起不来。想换用请先卸载它。` }
+                }
                 this.setTaskStep(id, 'download', `正在下载安装 ${only.name || o + '/' + r}…(网络慢时可能较久,请稍候)`)
                 const res = await this.addSpec(o, r, only.dir, id)
                 return res.ok
@@ -1597,7 +1665,25 @@ export class ZatMarketGateway extends TypertRemoteService {
         return { ok: false, message: '启用名单写入校验失败,已自动回滚' }
       }
       await this.saveLastKnownGood()
-      return { ok: true, enabled, message: enabled ? `${n} 已启用 — 重启 dsh 后生效` : `${n} 已停用 — 重启 dsh 后生效` }
+      let dependents = ''
+      if (!enabled) {
+        // Warn when other ENABLED plugins depend on the one being disabled —
+        // they would fail to load after the next restart.
+        try {
+          const pDeps = Object.keys((p.dependencies || {}) as Record<string, string>)
+          for (const dname of pDeps) {
+            if (dname === n || !bundles.includes(dname)) continue
+            try {
+              const meta = JSON.parse(readFileSync(join(dir, 'node_modules', dname, 'package.json'), 'utf8')) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }
+              const need = [...Object.keys(meta.dependencies || {}), ...Object.keys(meta.peerDependencies || {})]
+              if (need.includes(n)) dependents += (dependents ? '、' : '') + dname
+            } catch { /* skip unreadable */ }
+          }
+        } catch { /* best effort */ }
+      }
+      return { ok: true, enabled, message: enabled
+        ? `${n} 已启用 — 重启 dsh 后生效`
+        : `${n} 已停用 — 重启 dsh 后生效${dependents ? `。注意:${dependents} 依赖它,重启后可能加载失败` : ''}` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
@@ -1678,11 +1764,45 @@ export class ZatMarketGateway extends TypertRemoteService {
           issues.push({ level: 'warn', title: `依赖版本冲突:${dep}`, detail: list.map((x) => `${x.pkg} 要求 ${x.range}`).join(';') + '。大版本不一致时 pnpm 会装多份拷贝,宿主侧共享包可能出现状态分裂或报错。' })
         }
       }
+      // Registered-name collisions across enabled plugins.
+      const hostNames = new Map<string, string>()
+      const clientNames = new Map<string, string>()
+      for (const s of scanned) {
+        if (!s.enabled) continue
+        const names = await this.scanLocalNames(s.name)
+        for (const nm of names.host) {
+          const holder = hostNames.get(nm)
+          if (holder && holder !== s.name) {
+            issues.push({ level: 'error', title: `服务/提供名 "${nm}" 重复注册`, detail: `${holder} 和 ${s.name} 都提供了同名服务,后加载的会覆盖先加载的或直接报错,建议二选一。` })
+          } else if (!holder) {
+            hostNames.set(nm, s.name)
+          }
+        }
+        for (const nm of names.client) {
+          const holder = clientNames.get(nm)
+          if (holder && holder !== s.name) {
+            issues.push({ level: 'warn', title: `界面注册名 "${nm}" 重复`, detail: `${holder} 和 ${s.name} 注册了同一个界面位置,可能互相覆盖;若属有意共享可忽略。` })
+          } else if (!holder) {
+            clientNames.set(nm, s.name)
+          }
+        }
+      }
+      // Official-package version compatibility for enabled plugins.
+      for (const s of scanned) {
+        if (!s.enabled) continue
+        for (const [pd, range] of Object.entries(s.meta.peerDependencies || {})) {
+          if (!pd.startsWith('@deepseek-ai/')) continue
+          const installedVer = await this.installedVersionOf(pd)
+          if (installedVer && simpleMajorConflict(String(range), installedVer)) {
+            issues.push({ level: 'warn', title: `${s.name} 与官方包 ${pd} 版本可能不兼容`, detail: `插件要求 ${range},本机是 v${installedVer}。大版本不一致时运行可能报错,建议等插件作者适配。` })
+          }
+        }
+      }
       // Multiple market/manager plugins.
       const inst = this.installedMap(p)
       const markets: string[] = []
       for (const rec of Object.values(inst)) {
-        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name)) markets.push(rec.name)
+        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) markets.push(rec.name)
       }
       if (markets.length > 1) issues.push({ level: 'error', title: '装了多个市场/管理器插件', detail: markets.join('、') + ' 会互相覆盖设置页并注册冲突,建议只保留一个。' })
       if (issues.length === 0) issues.push({ level: 'ok', title: '体检通过', detail: '没有发现冲突、依赖矛盾或明显风险。' })
