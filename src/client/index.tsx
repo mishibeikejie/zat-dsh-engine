@@ -400,6 +400,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [health, setHealth] = useState<HealthIssue[] | null>(null)
   const [checking, setChecking] = useState(false)
   const [progress, setProgress] = useState<{ pct: number; message: string } | null>(null)
+  const [selfUpdating, setSelfUpdating] = useState(false)
   const [taskStates, setTaskStates] = useState<Record<string, { pct: number; message: string }>>({})
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadingRef = useRef(false)
@@ -1026,16 +1027,18 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {selfUpdate && (
           <button
             className="zat-updbtn"
-            disabled={!!progress}
+            disabled={selfUpdating}
             title={t('检测到插件市场新版本 v', 'Plugin Market update available v') + (selfUpdate.latestVersion || '')}
             onClick={() => {
-              if (progress) return
+              if (selfUpdating) return
+              setSelfUpdating(true)
               void pm.selfupdate(true).then((r) => {
-                if (!r.ok) { setNotice(r.error.message); return }
+                if (!r.ok) { setSelfUpdating(false); setNotice(r.error.message); return }
                 const value = r.value
                 const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
                 if (taskId) {
                   pollTask(taskId, (result) => {
+                    setSelfUpdating(false)
                     if (result && result.ok) {
                       setSelfUpdate(null)
                       setNotice(String(result.message || t('✅ 已更新!重启 dsh 后生效。', '✅ Updated! Restart dsh to activate.')))
@@ -1045,12 +1048,13 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                   })
                   return
                 }
+                setSelfUpdating(false)
                 setNotice(String(value?.message || ''))
                 if (value && value.ok) setSelfUpdate(null)
-              }).catch((err: unknown) => setNotice(String((err as { message?: string })?.message || err)))
+              }).catch((err: unknown) => { setSelfUpdating(false); setNotice(String((err as { message?: string })?.message || err)) })
             }}
           >
-            {progress ? t('更新中…', 'Updating…') : `↑ ${t('更新 v', 'Update v')}${selfUpdate.latestVersion || ''}`}
+            {selfUpdating ? t('更新中…', 'Updating…') : `↑ ${t('更新 v', 'Update v')}${selfUpdate.latestVersion || ''}`}
           </button>
         )}
         <div className="zat-search">
