@@ -32,6 +32,14 @@ Zat-DSH Engine 在 DeepSeek Harness 网页界面的 **设置 → 插件** 里新
 dsh plugin --profile web add github:mishibeikejie/zat-dsh-engine
 ```
 
+### 国内没有 VPN 时安装(走国内镜像,已实测可用)
+
+```sh
+dsh plugin --profile web add https://gh-proxy.com/https://github.com/mishibeikejie/zat-dsh-engine.git
+```
+
+两个命令任选其一,装的是同一个插件。装好之后,插件市场内部的搜索和安装自带镜像回退,不用再管网络问题。
+
 ### 从本地目录安装
 
 ```sh

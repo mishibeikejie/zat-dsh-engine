@@ -32,6 +32,14 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 dsh plugin --profile web add github:mishibeikejie/zat-dsh-engine
 ```
 
+### From China without a VPN (via the domestic mirror, verified)
+
+```sh
+dsh plugin --profile web add https://gh-proxy.com/https://github.com/mishibeikejie/zat-dsh-engine.git
+```
+
+Either command installs the same plugin. Once installed, the market's own search and install paths carry the mirror fallback, so networking is handled for you.
+
 ### From a local checkout
 
 ```sh
