@@ -1804,6 +1804,12 @@ export class ZatMarketGateway extends TypertRemoteService {
         try {
           sessionsStore.store.delete(id)
           ;(this.ctx as unknown as { emit(event: string, payload: unknown): void }).emit('session/disposed', liveSession)
+          const agentsRegistry = this.ctx.get('agents') as { get(sessionId: string): unknown; store?: Map<string, unknown> } | undefined
+          const liveAgent = agentsRegistry ? agentsRegistry.get(id) : undefined
+          if (liveAgent !== undefined && agentsRegistry?.store !== undefined) {
+            agentsRegistry.store.delete(id)
+            ;(this.ctx as unknown as { emit(event: string, payload: unknown): void }).emit('agent/disposed', liveAgent)
+          }
         } catch { /* best effort — a cold delete still works */ }
       }
       return { ok: true, message: `已删除会话 ${id}${warning ? '。' + warning : ''}` }
