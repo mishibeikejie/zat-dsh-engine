@@ -105,6 +105,12 @@ Then start dsh again. This restores the state right after the last successful op
 
 ## Changelog
 
+### v0.4.3
+
+- The find_plugin recommendation tool now runs a pre-install health check on every candidate, so problems surface before the user installs anything
+- Checks include: missing entry files (dist not committed — breaks on load), missing mount patch, official packages written as direct deps, peer deps not installed locally, install scripts downloading external components, code depending on external binaries, and archived/stale repos
+- The model now reports ❌/⚠️ candidates honestly instead of recommending plugins that look right but break in use
+
 ### v0.4.2
 
 - Fix: health check falsely reported "multiple marketplace plugins" (aliased entries counted twice)

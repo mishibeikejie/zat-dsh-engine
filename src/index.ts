@@ -161,7 +161,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.4.2'
+const SELF_VERSION = '0.4.3'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -227,6 +227,29 @@ function safePackageName(value: string): string | null {
   return /^@?[\w.-]+(?:\/[\w.-]+)?$/.test(v) ? v : null
 }
 
+/** 装前体检的一条结论。 */
+interface HealthIssue {
+  level: 'error' | 'warn'
+  title: string
+  detail: string
+}
+
+/** 装前体检结果:status = ok | warn | error | unknown | skip。 */
+interface HealthResult {
+  status: string
+  summary: string
+  checks: HealthIssue[]
+}
+
+/** 单个候选的体检时间上限,超时按 unknown 处理(模型调用不能被网络拖死)。 */
+const HEALTH_TIMEOUT_MS = 12000
+
+/** 最多对前几个候选做体检,避免一次工具调用打爆 GitHub 配额。 */
+const HEALTH_MAX = 5
+
+/** 常见系统命令不算"外部依赖";其余被 spawn/resolveExecutable 调用的都提示。 */
+const COMMON_BINS = new Set(['node', 'npm', 'pnpm', 'yarn', 'npx', 'git', 'cmd', 'powershell', 'pwsh', 'sh', 'bash', 'curl', 'wget', 'tar', 'unzip', '7z', 'python', 'python3'])
+
 export class ZatMarketGateway extends TypertRemoteService {
   static inject = ['subprocess']
 
@@ -247,6 +270,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   private readonly zhCache = new Map<string, { at: number; zh: string }>()
   /** Repo kind (plugin/nonplugin/multi/skill) merged from bundled data + live scan. */
   private readonly kindCache = new Map<string, string>()
+  /** 装前体检结果缓存(20 分钟),模型重复问同一批插件时不重复打网络。 */
+  private readonly healthCache = new Map<string, { at: number; data: HealthResult }>()
   private kindScanStarted = false
 
   constructor(ctx: Context) {
@@ -268,7 +293,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   private buildFindPluginTool(): unknown {
     return defineTool({
       name: 'find_plugin',
-      description: '在 DeepSeek Harness 插件市场里按需求搜索插件(中文或英文)。返回候选列表:名称、星数、简介、中文简介、是否可直接安装和安装命令。用户描述一个能力需求时调用;用户选定后,用返回的 install 命令安装(装完提示重启 dsh),并建议用户在插件市场里点「一键检测」确认无冲突。',
+      description: '在 DeepSeek Harness 插件市场里按需求搜索插件(中文或英文)。返回候选列表:名称、星数、简介、中文简介、是否可直接安装、安装命令,以及每个候选的「装前体检」(health)结果——体检检查入口文件是否真的存在、挂载补丁是否缺失、官方依赖是否写错、peer 依赖本机是否有、安装脚本是否要联网下载、是否依赖外部命令、仓库是否归档/停更。用户描述一个能力需求时调用;用户选定后,用返回的 install 命令安装(装完提示重启 dsh),并建议用户在插件市场里点「一键检测」确认与已装插件没有冲突。重要:体检结果是让你判断"能不能推荐"用的——带 ❌/[error] 硬伤的候选,装了也大概率用不了,必须把问题如实告诉用户,不要盲目推荐安装。',
       parameters: {
         query: { type: 'string', required: true, description: '能力需求,例如"OCR 截图转文字"或"终端 TUI"。' },
         limit: { type: 'number', description: '最多返回几个候选,1-10,默认 5。' },
@@ -294,6 +319,27 @@ export class ZatMarketGateway extends TypertRemoteService {
                   installable: { type: 'boolean' },
                   install: { type: 'string' },
                   url: { type: 'string' },
+                  health: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      status: { type: 'string', required: true },
+                      summary: { type: 'string', required: true },
+                      checks: {
+                        type: 'array',
+                        required: true,
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: {
+                            level: { type: 'string', required: true },
+                            title: { type: 'string', required: true },
+                            detail: { type: 'string', required: true },
+                          },
+                        },
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -308,7 +354,15 @@ export class ZatMarketGateway extends TypertRemoteService {
             const desc = String(it.description || '') + zh
             lines.push(`${i + 1}. ${String(it.fullName)} — ${Number(it.stars)}★ [${String(it.kind)}]${it.installable ? ' 可安装' : ' 不可直接安装'}`)
             if (desc.trim()) lines.push(`   ${desc.slice(0, 200)}`)
-            if (it.installable) lines.push(`   安装: ${String(it.install)}`)
+            const health = it.health as { status?: string; summary?: string; checks?: Array<{ level?: string; title?: string; detail?: string }> } | undefined
+            const status = health?.status || 'unknown'
+            const mark = status === 'ok' ? '✅' : status === 'warn' ? '⚠️' : status === 'error' ? '❌' : '❓'
+            lines.push(`   体检: ${mark} ${String(health?.summary || '未完成')}`)
+            for (const c of health?.checks || []) {
+              lines.push(`      [${String(c.level)}] ${String(c.title)} — ${String(c.detail || '').slice(0, 140)}`)
+            }
+            if (it.installable && typeof it.install === 'string' && String(it.install).trim()) lines.push(`   安装: ${String(it.install)}`)
+            else if (it.installable) lines.push('   安装: 多子包仓库,请在插件市场页面里选好子包再装')
             lines.push(`   详情: ${String(it.url)}`)
           }
           if (v.notice) lines.push(String(v.notice))
@@ -330,29 +384,78 @@ export class ZatMarketGateway extends TypertRemoteService {
         let raw: unknown[] = []
         try { raw = (JSON.parse(r.body) as { items?: unknown[] }).items ?? [] } catch { /* keep empty */ }
         await this.loadZhCache()
-        const items = raw.slice(0, limit).map((entry) => {
+        const picked = raw.slice(0, limit).map((entry) => {
           const it = entry as { full_name?: string; name?: string; stargazers_count?: number; description?: string | null; html_url?: string }
           const fullName = String(it.full_name || '')
-          const kind = this.kindOf(fullName.toLowerCase())
-          const cachedZh = this.zhCache.get(fullName.toLowerCase())
+          const seg = fullName.split('/')
           return {
             fullName,
             name: String(it.name || fullName),
+            owner: safeSegment(seg[0] || ''),
+            repo: safeSegment(seg.slice(1).join('/')),
             stars: Number(it.stargazers_count || 0),
             description: String(it.description || ''),
-            zhIntro: (cachedZh && cachedZh.zh) || '',
-            kind,
-            installable: kind === 'plugin' || kind === 'multi',
-            install: `dsh plugin --profile web add github:${fullName}`,
             url: String(it.html_url || `https://github.com/${fullName}`),
           }
         })
-        return {
-          items,
-          notice: items.length === 0
-            ? '没有找到匹配的插件,换个说法试试'
-            : `找到 ${items.length} 个候选。installable=true 的可以直接用 install 命令安装,装完重启 dsh;建议装后在插件市场点「一键检测」。`,
+        // 先给 unknown 的候选补一次真实分类(读根 package.json,不行再查子包),
+        // 避免把多子包仓库误标成"不可直接安装"。
+        await Promise.all(picked.map(async (it) => {
+          if (!it.owner || !it.repo) return
+          const lower = it.fullName.toLowerCase()
+          if (this.kindOf(lower) !== 'unknown') return
+          try {
+            const kind = await this.detectKind(it.owner, it.repo)
+            this.kindCache.set(lower, kind)
+          } catch { /* 保持 unknown */ }
+        }))
+        // 装前体检:最多查前 HEALTH_MAX 个候选,每批 3 个并发,单个 12 秒兜底。
+        const healths: HealthResult[] = []
+        for (let i = 0; i < picked.length; i += 3) {
+          const batch = picked.slice(i, i + 3)
+          const results = await Promise.all(batch.map((it, j) => {
+            const lower = it.fullName.toLowerCase()
+            const cached = this.healthCacheGet(lower)
+            if (cached) return cached
+            if (!it.owner || !it.repo) {
+              const bad: HealthResult = { status: 'skip', summary: '仓库名无法识别,跳过体检', checks: [] }
+              return bad
+            }
+            if (i + j >= HEALTH_MAX) {
+              const budget: HealthResult = { status: 'skip', summary: `候选较多,本次只对前 ${HEALTH_MAX} 个做了体检;这个装前没查过,先在插件市场详情页确认`, checks: [] }
+              return budget
+            }
+            const kind = this.kindOf(lower)
+            if (kind !== 'plugin' && kind !== 'multi' && kind !== 'unknown') {
+              const skip: HealthResult = { status: 'skip', summary: '不是可直接安装的插件,跳过体检', checks: [] }
+              return skip
+            }
+            return this.withHealthTimeout(this.analyzeCandidateHealth(it.owner, it.repo, kind), lower)
+          }))
+          healths.push(...results)
         }
+        const items = picked.map((it, i) => {
+          const kind = this.kindOf(it.fullName.toLowerCase())
+          const cachedZh = this.zhCache.get(it.fullName.toLowerCase())
+          const installable = kind === 'plugin' || kind === 'multi'
+          return {
+            fullName: it.fullName,
+            name: it.name,
+            stars: it.stars,
+            description: it.description,
+            zhIntro: (cachedZh && cachedZh.zh) || '',
+            kind,
+            installable,
+            install: kind === 'plugin' ? `dsh plugin --profile web add github:${it.fullName}` : '',
+            url: it.url,
+            health: healths[i]!,
+          }
+        })
+        const risky = items.filter((it) => it.health.status === 'error').length
+        const notice = items.length === 0
+          ? '没有找到匹配的插件,换个说法试试'
+          : `找到 ${items.length} 个候选,已对可安装的候选做装前体检。规则:带 ❌/[error] 硬伤的候选装了大概率用不了,别推荐安装,把问题如实告诉用户;带 ⚠️/[warn] 的提醒用户注意;✅ 的可以放心推荐。装完仍建议在插件市场点「一键检测」查与已装插件的冲突。` + (risky > 0 ? ` 本批有 ${risky} 个候选存在硬伤。` : '')
+        return { items, notice }
       },
     })
   }
@@ -807,6 +910,169 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
     } catch { /* best effort */ }
     return { block, warn }
+  }
+
+  // ── find_plugin 装前体检 ────────────────────────────────────────────────
+
+  private healthCacheGet(key: string): HealthResult | null {
+    const hit = this.healthCache.get(key)
+    if (hit && Date.now() - hit.at < 20 * 60 * 1000) return hit.data
+    return null
+  }
+
+  private healthCacheSet(key: string, data: HealthResult): void {
+    this.healthCache.set(key, { at: Date.now(), data })
+  }
+
+  /** 给体检加整体超时:网络慢时宁可返回 unknown,也不能拖死模型调用。 */
+  private withHealthTimeout(p: Promise<HealthResult>, key: string): Promise<HealthResult> {
+    const fallback: HealthResult = { status: 'unknown', summary: '网络较慢,体检没跑完;装之前先在插件市场详情页确认一下', checks: [] }
+    return Promise.race([
+      p.then((res) => {
+        if (res.status !== 'unknown') this.healthCacheSet(key, res)
+        return res
+      }),
+      new Promise<HealthResult>((resolve) => {
+        setTimeout(() => resolve(fallback), HEALTH_TIMEOUT_MS)
+      }),
+    ])
+  }
+
+  /**
+   * 装前体检:判断一个候选仓库是不是"一装就能用"。只读操作,不发安装命令。
+   * 检查:入口文件真实存在、挂载补丁存在、官方包依赖写法、peer 依赖本机
+   * 有着落、安装脚本联网下载、宿主代码调用外部程序、仓库归档/停更状态。
+   */
+  private async analyzeCandidateHealth(owner: string, repo: string, kind: string): Promise<HealthResult> {
+    const checks: HealthIssue[] = []
+    const base = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/`
+    try {
+      const pkgRes = await this.ghGet(base + 'package.json')
+      if (pkgRes.status !== 200) {
+        if (kind === 'multi') {
+          checks.push({ level: 'warn', title: '根目录没有 package.json', detail: '这是多插件仓库,插件都在子目录里;直接装根仓库会失败,需要在插件市场里选定子包再装。' })
+          return { status: 'warn', summary: '多插件仓库:需要先选子包', checks }
+        }
+        if (kind === 'plugin') {
+          checks.push({ level: 'error', title: '读不到 package.json', detail: '仓库标的是插件,但根目录读不到 package.json,按现在的安装方式会装不上。' })
+          return { status: 'error', summary: 'package.json 缺失,装不上', checks }
+        }
+        return { status: 'unknown', summary: '读不到 package.json,无法体检', checks }
+      }
+      interface CandidateMeta {
+        name?: string
+        main?: string
+        exports?: Record<string, string | { default?: string }>
+        dependencies?: Record<string, string>
+        peerDependencies?: Record<string, string>
+        peerDependenciesMeta?: Record<string, { optional?: boolean }>
+        scripts?: Record<string, string>
+        dsh?: { bundle?: { patch?: string } }
+      }
+      let meta: CandidateMeta
+      try {
+        meta = JSON.parse(pkgRes.body) as CandidateMeta
+      } catch {
+        checks.push({ level: 'error', title: 'package.json 不是合法 JSON', detail: 'pnpm/loader 解析会失败,装完直接报错。' })
+        return { status: 'error', summary: 'package.json 无法解析', checks }
+      }
+      if (kind === 'unknown') {
+        // 顺手补上仓库分类,后面 installable 判断就准了。
+        this.kindCache.set((owner + '/' + repo).toLowerCase(), meta.dsh?.bundle?.patch ? 'plugin' : 'nonplugin')
+      }
+      const canon = (rel: string): string => rel.replace(/^\.\//, '')
+      const entries = new Set<string>()
+      if (typeof meta.main === 'string' && meta.main && !meta.main.includes('*') && !meta.main.startsWith('http')) entries.add(canon(meta.main))
+      for (const v of Object.values(meta.exports || {})) {
+        const rel = typeof v === 'string' ? v : (v && typeof v === 'object' && typeof v.default === 'string' ? v.default : '')
+        if (rel && !rel.includes('*') && !rel.startsWith('http')) entries.add(canon(rel))
+        if (entries.size >= 2) break
+      }
+      const hostEntry = typeof meta.main === 'string' && meta.main ? meta.main : 'lib/index.js'
+      const wantPatch = meta.dsh?.bundle?.patch || ''
+      // 网络探测全部并行:入口文件、挂载补丁、宿主入口、仓库元数据。
+      const [missingEntries, patchMissing, hostText, repoMeta] = await Promise.all([
+        (async (): Promise<string[]> => {
+          const miss: string[] = []
+          for (const rel of entries) {
+            const er = await this.ghGet(base + rel)
+            if (er.status !== 200) miss.push(rel)
+          }
+          return miss
+        })(),
+        (async (): Promise<boolean> => {
+          if (!wantPatch) return false
+          const pr = await this.ghGet(base + wantPatch)
+          return pr.status !== 200
+        })(),
+        (async (): Promise<string> => {
+          if (kind !== 'plugin' && kind !== 'unknown') return ''
+          const hr = await this.ghGet(base + hostEntry)
+          return hr.status === 200 ? hr.body : ''
+        })(),
+        (async (): Promise<{ archived?: boolean; disabled?: boolean; fork?: boolean; pushed_at?: string } | null> => {
+          const token = await this.resolveToken()
+          if (!token) return null
+          const mr = await this.ghApi('GET', `/repos/${owner}/${repo}`, token)
+          if (mr.status !== 200) return null
+          try { return JSON.parse(mr.body) as { archived?: boolean; disabled?: boolean; fork?: boolean; pushed_at?: string } } catch { return null }
+        })(),
+      ])
+      if (missingEntries.length > 0) {
+        checks.push({ level: 'error', title: `入口文件缺失:${missingEntries.join('、')}`, detail: 'package.json 声明的入口在仓库里不存在——最常见的原因是构建产物(dist)没有提交到 git。装完 dsh 加载就会报错,插件等于用不了。' })
+      }
+      if (patchMissing) {
+        checks.push({ level: 'error', title: `挂载补丁缺失:${wantPatch}`, detail: 'dsh.bundle.patch 指向的文件不在仓库里,插件装完也不会被挂载,等于没装。' })
+      }
+      const officialDeps = Object.keys(meta.dependencies || {}).filter((d) => d.startsWith('@deepseek-ai/'))
+      if (officialDeps.length > 0) {
+        checks.push({ level: 'error', title: `官方包写进了 dependencies(共 ${officialDeps.length} 个)`, detail: `必须用 peerDependencies 引用:${officialDeps.join('、')}。写成直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。` })
+      }
+      const peers = meta.peerDependencies || {}
+      for (const pd of Object.keys(peers)) {
+        if (meta.peerDependenciesMeta?.[pd]?.optional) continue
+        const range = String(peers[pd])
+        if (pd.startsWith('@deepseek-ai/')) {
+          const iv = await this.installedVersionOf(pd)
+          if (iv && simpleMajorConflict(range, iv)) checks.push({ level: 'warn', title: `官方包 ${pd} 版本可能不兼容`, detail: `插件要求 ${range},本机是 v${iv},大版本不一致时运行可能报错。` })
+        } else if (!(await this.moduleProvided(pd))) {
+          checks.push({ level: 'warn', title: `需要 peer 依赖 ${pd},本机还没装`, detail: 'profile 默认不自动补装 peer;缺了它,插件运行时大概率直接报错。装完先看「一键检测」提示补什么。' })
+        }
+      }
+      for (const key of ['install', 'postinstall'] as const) {
+        const s = String((meta.scripts || {})[key] || '')
+        if (s && /curl|wget|Invoke-WebRequest|download|https?:\/\/|node\s+(?:scripts?\/|\.\/scripts)/i.test(s)) {
+          checks.push({ level: 'warn', title: `${key} 脚本要从网络下载外部组件`, detail: `安装时会执行「${s.slice(0, 90)}」;网络不稳或没有代理时,安装可能卡住或失败。` })
+        }
+      }
+      if (hostText) {
+        const externals = new Set<string>()
+        const re = /(?:resolveExecutable|spawn)\s*\(\s*['"]([^'"]{1,40})['"]/g
+        let m: RegExpExecArray | null
+        while ((m = re.exec(hostText)) !== null) {
+          // 归一化:strip 掉 .exe/.cmd/.bat 后缀,避免把 powershell.exe 误报成外部程序。
+          const bin = String(m[1] || '').toLowerCase().replace(/\.(?:exe|cmd|bat)$/i, '')
+          if (bin && !COMMON_BINS.has(bin)) externals.add(bin)
+        }
+        if (externals.size > 0) {
+          checks.push({ level: 'warn', title: `运行时依赖外部程序:${[...externals].join('、')}`, detail: '这些命令不在 npm 依赖里,需要另外安装配置;没有它们插件装上了,对应功能也用不了。' })
+        }
+      }
+      if (repoMeta) {
+        if (repoMeta.disabled) checks.push({ level: 'error', title: '仓库已被 GitHub 停用', detail: 'git 安装会直接失败,不要推荐。' })
+        if (repoMeta.archived) checks.push({ level: 'error', title: '仓库已归档(archived)', detail: '作者标记不再维护,出了问题不会修。' })
+        if (repoMeta.fork) checks.push({ level: 'warn', title: '这是一个 fork 仓库', detail: '上游更新不会自动同步过来;原仓库更活跃的话,优先装原仓库。' })
+        const pushed = repoMeta.pushed_at ? Date.parse(repoMeta.pushed_at) : 0
+        if (pushed > 0 && Date.now() - pushed > 365 * 24 * 3600 * 1000) checks.push({ level: 'warn', title: '最后更新超过一年', detail: '可能已停止维护,和新版本 dsh 的兼容性没有保障。' })
+      }
+      const errors = checks.filter((c) => c.level === 'error')
+      const warns = checks.filter((c) => c.level === 'warn')
+      if (errors.length > 0) return { status: 'error', summary: `${errors.length} 个硬伤:${errors.map((c) => c.title).join(';').slice(0, 140)}`, checks }
+      if (warns.length > 0) return { status: 'warn', summary: `${warns.length} 个风险点:${warns.map((c) => c.title).join(';').slice(0, 140)}`, checks }
+      return { status: 'ok', summary: '仓库结构、入口、依赖声明正常', checks }
+    } catch (err) {
+      return { status: 'unknown', summary: `体检异常:${String((err as { message?: string })?.message || err).slice(0, 80)}`, checks }
+    }
   }
 
   /**
