@@ -373,7 +373,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (isMarket) conflicts.push(rec.name)
       }
       if (conflicts.length > 0) {
-        return `已拦截安装:你的 profile 里已经装了市场/管理器类插件 ${conflicts.join('、')}。两个市场类插件同时存在会互相覆盖设置页、注册冲突,可能让 dsh 直接起不来(已经有人踩过这个坑)。想装这个,请先在市场里把原来的卸载掉;装完重启后如果再换回来,同样先卸载再装。`
+        return `已拦截:装了市场类插件 ${conflicts.join('、')},再装会互相冲突导致 dsh 起不来。想换用请先卸载它。`
       }
       return null
     } catch {
@@ -462,7 +462,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     // (1) Official packages must be peers, never direct deps — a direct dep
     // installs a second copy and hijacks the official loader rows.
     for (const d of Object.keys(meta.dependencies || {})) {
-      if (d.startsWith('@deepseek-ai/')) block.push(`把官方包 ${d} 写进了 dependencies(应改用 peerDependencies),会装出第二份拷贝并劫持官方 loader 行`)
+      if (d.startsWith('@deepseek-ai/')) block.push(`官方包${d}应为peer依赖`)
     }
     // (2) Loader row id collisions with installed bundles.
     if (meta.dsh?.bundle?.patch) {
@@ -472,7 +472,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const installed = await this.installedPatchIds()
         for (const id of candIds) {
           const holder = installed.get(id)
-          if (holder) block.push(`挂载行 id "${id}" 与已装插件 ${holder} 重复,加载时会发生冲突`)
+          if (holder) block.push(`挂载行${id}与${holder}重复`)
         }
       }
     }
@@ -916,7 +916,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (gate) return { ok: false, packageName: null, message: gate }
     const analysis = await this.analyzeCandidateConflicts(o, repoName, s || undefined)
     if (analysis.block.length > 0) {
-      return { ok: false, packageName: null, message: '安装前检查发现硬冲突,已拦截:\n- ' + analysis.block.join('\n- ') + `\n确定仍要安装,请用官方命令强制安装(风险自负): dsh plugin --profile <你的profile> add ${spec}` }
+      return { ok: false, packageName: null, message: `安装已拦截:${analysis.block.join(';')}。确要强制安装请用官方命令。` }
     }
     const warnings = analysis.warn.length > 0 ? analysis.warn.join('; ') : undefined
     this.invalidateListCache()

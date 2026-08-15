@@ -436,7 +436,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   // Notices auto-fade so a stale message never sticks to the panel.
   useEffect(() => {
     if (!notice) return
-    const timer = setTimeout(() => setNotice(''), 12000)
+    const timer = setTimeout(() => setNotice(''), 5500)
     return () => clearTimeout(timer)
   }, [notice])
 
