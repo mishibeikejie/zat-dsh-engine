@@ -656,7 +656,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     const ddesc = (zh && detail.zhIntro) ? detail.zhIntro : (detail.description || '')
     const mainBtn = detail.isHarness || Boolean(dd && dd.notPlugin)
       ? null
-      : !detail.installed
+      : !detail.installed && !detail.disabled
         ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
         : detail.installed && detail.hasUpdate
           ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
@@ -678,7 +678,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             <span>⑂ {formatStars(detail.forks)} forks</span>
             {detail.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[detail.language] || '#8b949e' }} /> {detail.language}</span>}
             <span>{t('更新 ', 'Updated ')}{String(detail.updatedAt || '').slice(0, 10)}</span>
-            {detail.installed && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
+            {(detail.installed || detail.disabled) && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
             {detail.hasUpdate && detail.latestVersion && <span className="zat-ver">{t('最新 v', 'Latest v')}{detail.latestVersion}</span>}
           </div>
           {detail.isHarness && (
@@ -724,7 +724,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                 {installing ? t('处理中…', '...') : t('停用插件', 'Disable')}
               </button>
             )}
-            {detail.installed && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
+            {(detail.installed || detail.disabled) && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
             <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>
           </div>
           {notice && <div className="zat-notice">{notice}</div>}
