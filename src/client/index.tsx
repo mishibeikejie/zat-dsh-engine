@@ -78,6 +78,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
+    'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -105,6 +106,7 @@ interface MarketRemote extends TypertClientRemote {
     installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
+    setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -146,6 +148,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('installPlugin', ['owner', 'repo', 'subdir']),
   desc('update', ['owner', 'repo', 'subdir']),
   desc('uninstall', ['name']),
+  desc('setEnabled', ['name', 'enabled']),
   desc('star', ['owner', 'repo']),
   desc('starredList', []),
   desc('setToken', ['token']),
@@ -545,6 +548,26 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     })
   }
 
+  /** Toggle a plugin between the enabled/disabled bundle list. */
+  function doSetEnabled(item: MarketItem, enabled: boolean): void {
+    const name = item.installedName
+    if (!name) return
+    setInstalling(item.fullName)
+    void pm.setEnabled(name, enabled).then((res) => {
+      setInstalling('')
+      const value = res.ok ? res.value : null
+      setNotice(res.ok ? String(value?.message || '') : res.error.message)
+      if (res.ok && value?.ok) {
+        refreshItem(item.fullName, enabled
+          ? { installed: true, disabled: false }
+          : { installed: false, disabled: true, hasUpdate: false })
+      }
+    }).catch((err: unknown) => {
+      setInstalling('')
+      setNotice(String((err as { message?: string })?.message || err))
+    })
+  }
+
   function doUninstall(item: MarketItem): void {
     const name = item.installedName
     if (!name) return
@@ -562,7 +585,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function cardAction(item: MarketItem): void {
     if (item.isHarness) { setDetail(item); return }
-    if (item.disabled) { setDetail(item); return }
+    if (item.disabled) { doSetEnabled(item, true); return }
     if (item.kind === 'skill' || item.kind === 'nonplugin') { setDetail(item); return }
     if (item.installed && item.hasUpdate) doUpdate(item)
     else if (!item.installed) doInstall(item)
@@ -645,7 +668,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             <div className="zat-subchoices">
               <div className="zat-subchoices-title">
                 {t('这个插件已安装,但不在启用列表里——重启 dsh 也不会加载。', 'This plugin is installed but missing from the bundle list — it will not load even after a restart.')}
-                {' ' + t('重新点一次安装通常能修复;或手动运行 dsh plugin 命令启用。', 'Installing again usually fixes it, or enable it with the dsh plugin command.')}
+                {' ' + t('点下面的「启用插件」即可一键修复。', 'Click "Enable" below to fix it in one click.')}
               </div>
             </div>
           )}
@@ -656,6 +679,16 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>}
           <div className="zat-actions">
             {mainBtn}
+            {detail.disabled && !detail.isHarness && (
+              <button className="zat-btn zat-primary" onClick={() => doSetEnabled(detail, true)} disabled={!!installing}>
+                {installing ? t('处理中…', '...') : t('启用插件', 'Enable')}
+              </button>
+            )}
+            {canDisable(detail) && (
+              <button className="zat-btn" onClick={() => doSetEnabled(detail, false)} disabled={!!installing}>
+                {installing ? t('处理中…', '...') : t('停用插件', 'Disable')}
+              </button>
+            )}
             {detail.installed && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
             <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>
           </div>
@@ -771,6 +804,15 @@ interface MarketCardProps {
   onStar: (item: MarketItem) => void
 }
 
+/** A plugin can be disabled unless it is official core or the market itself. */
+function canDisable(item: MarketItem): boolean {
+  if (!item.installed || item.disabled || item.isHarness) return false
+  const name = item.installedName || ''
+  if (name.startsWith('@deepseek-ai/')) return false
+  if (item.fullName.toLowerCase() === 'mishibeikejie/zat-dsh-engine') return false
+  return true
+}
+
 function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
@@ -786,7 +828,7 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar }: Marke
     : item.isHarness
       ? (zh ? '✓ 使用中' : '✓ In use')
       : item.disabled
-        ? (zh ? '已装·未启用' : 'Installed, disabled')
+        ? (zh ? '已装·未启用 → 点此启用' : 'Installed, disabled → click to enable')
         : nonInstallable
           ? (item.kind === 'skill'
             ? (zh ? '技能 · 不可安装' : 'Skill · not installable')

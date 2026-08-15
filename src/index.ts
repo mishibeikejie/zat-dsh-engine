@@ -14,7 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 import bundledKinds from '../data/kinds.json'
@@ -275,6 +275,30 @@ export class ZatMarketGateway extends TypertRemoteService {
   /** Write a file directly through node:fs (this package is trusted Node code). */
   private async writeFileText(path: string, content: string): Promise<void> {
     writeFileSync(path, content, 'utf8')
+  }
+
+  /**
+   * Quality gate: snapshot the profile manifest files before a mutating
+   * operation, restore them when it fails. Keeps the profile bootable.
+   */
+  private async snapshotProfile(dir: string): Promise<Record<string, string | null>> {
+    const files = ['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml']
+    const out: Record<string, string | null> = {}
+    for (const f of files) {
+      try { out[f] = readFileSync(join(dir, f), 'utf8') } catch { out[f] = null }
+    }
+    return out
+  }
+
+  private async restoreProfile(dir: string, snap: Record<string, string | null>): Promise<void> {
+    for (const f of Object.keys(snap)) {
+      const content = snap[f]
+      if (content === null) {
+        try { unlinkSync(join(dir, f)) } catch { /* never existed */ }
+      } else {
+        await this.writeFileText(join(dir, f), content)
+      }
+    }
   }
 
   /**
@@ -658,17 +682,19 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
+    const snap = await this.snapshotProfile(dir)
     const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
     if (pnpmResult.outcome.exitCode !== 0) {
+      await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
       if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
         return {
           ok: false,
           packageName: null,
-          message: `安装失败:该插件安装时需要运行构建脚本,被 pnpm 安全策略阻止。请手动编辑 ${join(dir, 'pnpm-workspace.yaml')},在 allowBuilds 列表中加入该插件名后重试,或改用官方命令: dsh plugin --profile <你的profile> add ${spec}`,
+          message: `安装失败:该插件安装时需要运行构建脚本,被 pnpm 安全策略阻止(配置已自动还原)。请手动编辑 ${join(dir, 'pnpm-workspace.yaml')},在 allowBuilds 列表中加入该插件名后重试,或改用官方命令: dsh plugin --profile <你的profile> add ${spec}`,
         }
       }
-      return { ok: false, packageName: null, message: errText.slice(0, 2000) || 'pnpm failed' }
+      return { ok: false, packageName: null, message: (errText.slice(0, 2000) || 'pnpm failed') + ' — profile 配置已自动回滚到安装前状态' }
     }
     const after = await this.readProfile()
     const deps = Object.keys((after.dependencies || {}) as Record<string, string>)
@@ -694,6 +720,15 @@ export class ZatMarketGateway extends TypertRemoteService {
       ;(after.dsh as JsonObject).profile = (after.dsh as JsonObject).profile || {}
       ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
       await this.writeProfile(after)
+      // Post-validation: the written profile must parse and carry the bundle.
+      try {
+        const check = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
+        const checkBundles = ((check.dsh as JsonObject | undefined)?.profile as JsonObject | undefined)?.bundles
+        if (!Array.isArray(checkBundles) || !checkBundles.includes(added)) throw new Error('bundles not persisted')
+      } catch {
+        await this.restoreProfile(dir, snap)
+        return { ok: false, packageName: null, message: '安装成功但启用名单写入校验失败,已自动回滚到安装前状态。请重试或手动编辑 profile。' }
+      }
       return { ok: true, packageName: added }
     }
     if (missingBundle) {
@@ -1047,8 +1082,12 @@ export class ZatMarketGateway extends TypertRemoteService {
       const n = safePackageName(name)
       if (!n) return { ok: false, message: 'invalid package name' }
       const dir = await this.getProfileDir()
+      const snap = await this.snapshotProfile(dir)
       const r = await this.pnpmShell('pnpm remove ' + n, dir)
-      if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
+      if (r.outcome.exitCode !== 0) {
+        await this.restoreProfile(dir, snap)
+        return { ok: false, message: ((r.stderr || r.stdout || 'pnpm failed').slice(0, 2000)) + ' — profile 配置已自动回滚' }
+      }
       const after = await this.readProfile()
       const profile = ((after.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
       const bundles = Array.isArray(profile.bundles) ? (profile.bundles as string[]).filter((b) => b !== n) : []
@@ -1059,6 +1098,44 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.writeProfile(after)
       }
       return { ok: true, message: 'removed ' + n }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  /** Enable or disable one installed plugin (add/remove its bundle entry). */
+  @Remote('setEnabled')
+  async setEnabled(name: string, enabled: boolean): Promise<JsonObject> {
+    try {
+      const n = safePackageName(name)
+      if (!n) return { ok: false, message: 'invalid package name' }
+      const dir = await this.getProfileDir()
+      const p = await this.readProfile()
+      const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
+      const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
+      if (enabled) {
+        if (bundles.includes(n)) return { ok: true, enabled: true, message: `${n} 已经在启用列表中` }
+        bundles.push(n)
+      } else {
+        if (!bundles.includes(n)) return { ok: true, enabled: false, message: `${n} 本来就不在启用列表中` }
+        if (n.startsWith('@deepseek-ai/')) return { ok: false, message: `${n} 是官方基础组件,停用会导致 dsh 无法启动,已阻止` }
+        bundles.splice(bundles.indexOf(n), 1)
+      }
+      const snap = await this.snapshotProfile(dir)
+      p.dsh = p.dsh || {}
+      ;(p.dsh as JsonObject).profile = (p.dsh as JsonObject).profile || {}
+      ;((p.dsh as JsonObject).profile as JsonObject).bundles = bundles
+      await this.writeProfile(p)
+      try {
+        const check = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
+        const checkBundles = ((check.dsh as JsonObject | undefined)?.profile as JsonObject | undefined)?.bundles
+        const okState = enabled ? Array.isArray(checkBundles) && checkBundles.includes(n) : Array.isArray(checkBundles) && !checkBundles.includes(n)
+        if (!okState) throw new Error('bundle state not persisted')
+      } catch {
+        await this.restoreProfile(dir, snap)
+        return { ok: false, message: '启用名单写入校验失败,已自动回滚' }
+      }
+      return { ok: true, enabled, message: enabled ? `${n} 已启用 — 重启 dsh 后生效` : `${n} 已停用 — 重启 dsh 后生效` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
