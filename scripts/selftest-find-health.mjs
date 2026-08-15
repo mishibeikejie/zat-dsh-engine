@@ -114,6 +114,8 @@ const secCases = [
   ["fetch('https://evil-paste.xyz/save')", true, /可疑网络去向/],
   ["fetch('https://api.deepseek.com/v1/chat')", false, null],
   ["fetch('https://vision-provider.example.com/ocr')", true, /外部服务/],
+  ["fetch('http://your-mineru-host:8000/parse')", true, /占位/],
+  ["fetch('http://x/api')", true, /占位/],
 ]
 for (const [code, expectFinding, pattern] of secCases) {
   const hits = scanSecurity(String(code), '代码')

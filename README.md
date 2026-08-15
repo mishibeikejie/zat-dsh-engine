@@ -103,6 +103,18 @@ Then start dsh again. This restores the state right after the last successful op
 
 **Can I install two marketplace plugins at once?** No — the install gate blocks it: two market/manager plugins register the same settings pages and services, which can take dsh down. Uninstall the current one first if you want to switch.
 
+## Permissions & trust (security-review perspective)
+
+This marketplace is at heart a **package manager**, and that job itself requires strong capabilities. A security review will always see the behaviors below — here is what each one is for and where its boundaries are:
+
+- **Running shell commands**: install/update/uninstall means running pnpm. The market only runs the pnpm/curl/wget/powershell commands it assembles itself; during install, pnpm runs the plugin's own prepare/postinstall scripts (standard behavior for every package manager) — the market scans those scripts first and warns ahead of time about network downloads or high-risk patterns.
+- **Reading git credentials**: used in exactly two places — starring a repo and the "set GitHub token" feature. Credentials only go to api.github.com; they are never written to disk, logged, or sent anywhere else.
+- **The gh-proxy.com mirror**: only as a fallback when a direct GitHub request fails, and only for public repository metadata. A plugin's own network behavior after install has nothing to do with the mirror.
+- **Reading/writing profile files**: install/uninstall/toggle must edit the profile's package.json etc. Every change is backed up to `zat-backup/` first, and failed operations restore automatically.
+- **Pre-install health + security scan**: every candidate and every installed plugin is scanned for structural, dependency, and security patterns (obfuscation, credential theft, suspicious exfiltration, system modification); error-level findings block the install, and all network destinations are listed before install.
+
+Each of these is the minimal permission set required for the market to work; if a review questions a specific behavior, this section is the reference.
+
 ## Changelog
 
 ### v0.4.3

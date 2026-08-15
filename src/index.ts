@@ -335,9 +335,14 @@ export function scanSecurity(text: string, where: string): HealthIssue[] {
     out.push({ level: 'warn', title: `${where}会修改系统设置(注册表/计划任务/防火墙)`, detail: '插件一般不需要动系统级配置;装前确认这是它功能的一部分。' })
   }
   const hosts = extractHosts(text)
-  const suspicious = hosts.filter((h) => isSuspiciousHost(h))
+  // 占位域名(host、x、your-mineru-host 这类)不是外发风险,而是"功能没配好",
+  // 降为 warn;裸 IP/可疑顶级域/粘贴板钩子才是 error。
+  const placeholders = hosts.filter((h) => !h.includes('.') || /^(?:your|my|example|xxx|test|demo)[-_]/i.test(h))
+  const suspicious = hosts.filter((h) => !placeholders.includes(h) && isSuspiciousHost(h))
   if (suspicious.length > 0) {
     out.push({ level: 'error', title: `${where}可疑网络去向:${suspicious.slice(0, 5).join('、')}`, detail: '裸 IP、一次性域名或可疑顶级域,不像正规服务;插件可能把数据发往这里,建议不要安装。' })
+  } else if (placeholders.length > 0) {
+    out.push({ level: 'warn', title: `${where}有占位/无效域名:${placeholders.slice(0, 5).join('、')}`, detail: '代码里的这个地址是占位符,没有真实域名——说明功能还没配置好,装完不配置就用不了;不是外发风险。' })
   } else if (hosts.length > 0) {
     out.push({ level: 'warn', title: `${where}会连接外部服务:${hosts.slice(0, 10).join('、')}`, detail: '装之前确认这些服务器就是插件功能要用的;数量很多或和功能对不上时要警惕。' })
   }
