@@ -425,7 +425,7 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   // ── background install tasks (progress reporting) ──────────────────────
 
-  private tasks = new Map<string, { step: string; message: string; progress: number; done: boolean; ok?: boolean; result?: JsonObject }>()
+  private tasks = new Map<string, { step: string; message: string; progress: number; done: boolean; ok?: boolean; result?: JsonObject; subject?: { owner: string; repo: string } }>()
   private taskSeq = 0
 
   @Remote('taskStatus')
@@ -460,9 +460,9 @@ export class ZatMarketGateway extends TypertRemoteService {
     setTimeout(() => { this.tasks.delete(id) }, 10 * 60 * 1000)
   }
 
-  private launchTask(work: (id: string) => Promise<JsonObject>): string {
+  private launchTask(work: (id: string) => Promise<JsonObject>, subject?: { owner: string; repo: string }): string {
     const id = 'task-' + (++this.taskSeq)
-    this.tasks.set(id, { step: 'start', message: '准备中…', progress: 1, done: false })
+    this.tasks.set(id, { step: 'start', message: '准备中…', progress: 1, done: false, ...(subject ? { subject } : {}) })
     void work(id).then((result) => this.finishTask(id, result)).catch((err: unknown) => {
       this.finishTask(id, { ok: false, message: String((err as { message?: string })?.message || err) })
     })
@@ -1542,7 +1542,7 @@ export class ZatMarketGateway extends TypertRemoteService {
                 return res.ok
                   ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
                   : { ok: false, packageName: null, message: res.message }
-              })
+              }, { owner: o, repo: r })
               return { ok: true, taskId }
             }
             return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
@@ -1561,7 +1561,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         return res.ok
           ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, packageName: null, message: res.message }
-      })
+      }, { owner: o, repo: r })
       return { ok: true, taskId }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -1647,7 +1647,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       await this.loadZhCache()
       const p = await this.readProfile()
       const inst = this.installedMap(p)
-      const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean }> = []
+      const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean; installing?: boolean; taskId?: string }> = []
       const seen = new Set<string>()
       for (const rec of Object.values(inst)) {
         let owner = rec.owner
@@ -1663,6 +1663,17 @@ export class ZatMarketGateway extends TypertRemoteService {
         seen.add(key)
         unique.push({ name: rec.name, owner, repo, enabled: rec.enabled })
       }
+      // Installations currently in flight also belong in the installed view:
+      // their card shows the live progress and the state survives leaving the
+      // settings page and coming back.
+      for (const [taskId, task] of this.tasks) {
+        if (task.done || !task.subject) continue
+        const fullName = task.subject.owner + '/' + task.subject.repo
+        if (fullName.toLowerCase() === SELF_REPO) continue
+        if (seen.has(fullName.toLowerCase())) continue
+        seen.add(fullName.toLowerCase())
+        unique.push({ name: fullName, owner: task.subject.owner, repo: task.subject.repo, enabled: false, installing: true, taskId })
+      }
       const items: JsonObject[] = []
       let next = 0
       const worker = async (): Promise<void> => {
@@ -1675,7 +1686,7 @@ export class ZatMarketGateway extends TypertRemoteService {
             const it = JSON.parse(repoRes.body) as { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null }
             const cachedZh = this.zhCache.get(fullName.toLowerCase())
             const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
-            items.push({
+            const item: JsonObject = {
               fullName,
               owner: rec.owner,
               name: it.name || rec.repo,
@@ -1696,7 +1707,10 @@ export class ZatMarketGateway extends TypertRemoteService {
               disabled: Boolean(!rec.enabled),
               kind: this.kindOf(fullName.toLowerCase()),
               cover: 'https://opengraph.githubassets.com/1/' + fullName,
-            })
+            }
+            if (rec.installing) item.installing = true
+            if (rec.taskId) item.taskId = rec.taskId
+            items.push(item)
           } catch { /* skip unreadable repo json */ }
         }
       }

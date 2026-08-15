@@ -47,6 +47,10 @@ interface MarketItem {
   kind?: string
   /** The current GitHub user has starred this repo (needs a token). */
   starred?: boolean
+  /** An install task is running for this repo right now. */
+  installing?: boolean
+  /** Background task id to poll for live progress. */
+  taskId?: string
 }
 
 interface MarketListResult {
@@ -362,6 +366,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [health, setHealth] = useState<HealthIssue[] | null>(null)
   const [checking, setChecking] = useState(false)
   const [progress, setProgress] = useState<{ pct: number; message: string } | null>(null)
+  const [taskStates, setTaskStates] = useState<Record<string, { pct: number; message: string }>>({})
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -512,6 +517,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setInstalledMode(true)
       requestZh(data.items)
       requestVersions(data.items)
+      // Resume watching any in-flight installs so their cards show progress
+      // even after leaving the settings page and coming back.
+      for (const it of data.items) {
+        if (it.taskId && it.installing) watchTask(it.taskId, it.fullName)
+      }
     }).catch((err: unknown) => {
       setLoading(false)
       setError(String((err as { message?: string })?.message || err))
@@ -578,6 +588,44 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     setDetail((d) => (d && d.fullName === fullName ? { ...d, ...patch } : d))
   }
 
+  /**
+   * Watch a background task that belongs to a card (survives leaving and
+   * re-entering the market): updates the card's progress and, on completion,
+   * refreshes the item state and shows the result.
+   */
+  function watchTask(taskId: string, fullName: string): void {
+    const tick = (): void => {
+      void pm.taskStatus(taskId).then((res) => {
+        if (!res.ok) {
+          setTaskStates((prev) => { const nx = { ...prev }; delete nx[fullName]; return nx })
+          return
+        }
+        const task = (res.value && res.value.task) as { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } | undefined
+        if (!task) {
+          setTaskStates((prev) => { const nx = { ...prev }; delete nx[fullName]; return nx })
+          return
+        }
+        if (task.done) {
+          setTaskStates((prev) => { const nx = { ...prev }; delete nx[fullName]; return nx })
+          const result = task.result || { ok: false, message: t('任务无结果', 'No task result') }
+          if (result.ok) {
+            setNotice(String(result.message || t('✅ 完成!', '✅ Done!')))
+            refreshItem(fullName, { installed: true, disabled: false, installing: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+          } else {
+            setNotice(String(result.message || t('安装失败', 'Install failed')))
+            refreshItem(fullName, { installing: false })
+          }
+          return
+        }
+        setTaskStates((prev) => ({ ...prev, [fullName]: { pct: Math.max(1, Math.min(99, Number(task.progress) || 1)), message: String(task.message || t('处理中…', 'Working…')) } }))
+        setTimeout(tick, 600)
+      }).catch(() => {
+        setTaskStates((prev) => { const nx = { ...prev }; delete nx[fullName]; return nx })
+      })
+    }
+    tick()
+  }
+
   /** Poll a background task, rendering its progress until it finishes. */
   function pollTask(taskId: string, onDone: (result: MarketJson) => void): void {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
@@ -614,6 +662,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   function doInstall(item: MarketItem): void {
+    if (installing || item.installing) { setNotice(t('这个插件正在安装中,请稍候', 'This plugin is already installing — please wait')); return }
     setInstalling(item.fullName)
     setProgress({ pct: 2, message: t('正在准备安装…', 'Preparing install…') })
     void pm.installPlugin(item.owner, item.name, '').then((res) => {
@@ -1005,7 +1054,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {items && items.length === 0 && <div className="zat-status">{t('没有找到插件', 'No plugins found')}</div>}
         {items && items.length > 0 && filtered.length === 0 && <div className="zat-status">{t('当前筛选条件下没有插件', 'No plugins match filters')}</div>}
         {filtered.map((it) => (
-          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} progress={installing === it.fullName ? progress : null} onOpen={openDetail} onAction={cardAction} onStar={onStar} onToggle={doSetEnabled} />
+          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} progress={installing === it.fullName ? progress : null} taskProgress={taskStates[it.fullName] || null} onOpen={openDetail} onAction={cardAction} onStar={onStar} onToggle={doSetEnabled} />
         ))}
         {loading && <div className="zat-loading">{t('正在加载…', 'Loading…')}</div>}
       </div>
@@ -1039,6 +1088,7 @@ interface MarketCardProps {
   t: (zh: string, en: string) => string
   installing: boolean
   progress: { pct: number; message: string } | null
+  taskProgress: { pct: number; message: string } | null
   onOpen: (item: MarketItem) => void
   onAction: (item: MarketItem) => void
   onStar: (item: MarketItem) => void
@@ -1054,17 +1104,19 @@ function canDisable(item: MarketItem): boolean {
   return true
 }
 
-function MarketCard({ item, zh, t, installing, progress, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
+function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
   const nonInstallable = item.kind === 'skill' || item.kind === 'nonplugin'
+  const busy = installing || Boolean(item.installing && !item.installed)
+  const shownProgress = installing && progress ? progress : taskProgress
   const btnClass = item.disabled
     ? 'zat-disabled'
     : nonInstallable
       ? (item.kind === 'skill' ? 'zat-noninstall' : 'zat-nonplugin')
       : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
-  const btnText = installing
+  const btnText = busy
     ? t('处理中…', '...')
     : item.isHarness
       ? (zh ? '✓ 使用中' : '✓ In use')
@@ -1114,10 +1166,10 @@ function MarketCard({ item, zh, t, installing, progress, onOpen, onAction, onSta
             </button>
           )}
         </div>
-        {installing && progress
+        {shownProgress
           ? <div className="zat-cardprogress">
-              <div className="zat-pbar"><div className="zat-pfill" style={{ width: progress.pct + '%' }} /></div>
-              <div className="zat-ptext">{progress.message}</div>
+              <div className="zat-pbar"><div className="zat-pfill" style={{ width: shownProgress.pct + '%' }} /></div>
+              <div className="zat-ptext">{shownProgress.message}</div>
             </div>
           : <button className={`zat-cardbtn ${btnClass}`} onClick={(e) => { e.stopPropagation(); onAction(item) }} disabled={!!installing}>{btnText}</button>}
       </div>
