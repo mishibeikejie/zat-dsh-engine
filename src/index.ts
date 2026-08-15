@@ -193,6 +193,17 @@ function safeSegment(value: string): string {
   return /^[\w.-]+$/.test(v) ? v : ''
 }
 
+/** Resolve a repo-relative path against the host entry's directory (POSIX). */
+function resolveRel(dir: string, ref: string): string {
+  const out: string[] = []
+  for (const part of (dir + '/' + ref).split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return out.join('/')
+}
+
 /** Extract loader row ids from a patch YAML text (line-based, tolerant). */
 function extractPatchIds(yaml: string): Set<string> {
   const ids = new Set<string>()
@@ -272,6 +283,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   private readonly kindCache = new Map<string, string>()
   /** 装前体检结果缓存(20 分钟),模型重复问同一批插件时不重复打网络。 */
   private readonly healthCache = new Map<string, { at: number; data: HealthResult }>()
+  /** GitHub 搜索结果缓存(10 分钟),模型连发相近查询时不烧匿名配额。 */
+  private readonly searchCache = new Map<string, { at: number; body: string }>()
   private kindScanStarted = false
 
   constructor(ctx: Context) {
@@ -377,12 +390,23 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (!query) return { items: [], notice: '需求描述是空的,请说明想要什么功能的插件' }
         const q = 'topic:dsh-plugin+' + encodeQueryPart(query)
         const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=${limit}&page=1`
-        const r = await this.ghGet(url)
+        const r = await this.ghSearch(url)
         if (r.status !== 200) {
           return { items: [], notice: `搜索失败(${r.status})${r.error ? ':' + r.error.slice(0, 120) : ''}。稍后再试,或换个说法。` }
         }
         let raw: unknown[] = []
         try { raw = (JSON.parse(r.body) as { items?: unknown[] }).items ?? [] } catch { /* keep empty */ }
+        let broadUsed = false
+        if (raw.length === 0) {
+          // 精确 topic 匹配为空时,放宽成全文搜"需求 + dsh-plugin",给没打标签
+          // 的仓库一次机会;结果会照常体检,装不上的照样标出来。
+          const broad = `https://api.github.com/search/repositories?q=${encodeQueryPart(query)}+dsh-plugin&sort=stars&order=desc&per_page=${limit}&page=1`
+          const br = await this.ghSearch(broad)
+          if (br.status === 200) {
+            try { raw = (JSON.parse(br.body) as { items?: unknown[] }).items ?? [] } catch { /* keep empty */ }
+            broadUsed = raw.length > 0
+          }
+        }
         await this.loadZhCache()
         const picked = raw.slice(0, limit).map((entry) => {
           const it = entry as { full_name?: string; name?: string; stargazers_count?: number; description?: string | null; html_url?: string }
@@ -452,9 +476,10 @@ export class ZatMarketGateway extends TypertRemoteService {
           }
         })
         const risky = items.filter((it) => it.health.status === 'error').length
+        const broadPrefix = broadUsed ? '没有打 dsh-plugin 标签的精确匹配,以下是放宽搜索后的结果(可能不是一键式插件,以体检结果为准)。' : ''
         const notice = items.length === 0
-          ? '没有找到匹配的插件,换个说法试试'
-          : `找到 ${items.length} 个候选,已对可安装的候选做装前体检。规则:带 ❌/[error] 硬伤的候选装了大概率用不了,别推荐安装,把问题如实告诉用户;带 ⚠️/[warn] 的提醒用户注意;✅ 的可以放心推荐。装完仍建议在插件市场点「一键检测」查与已装插件的冲突。` + (risky > 0 ? ` 本批有 ${risky} 个候选存在硬伤。` : '')
+          ? (broadUsed ? broadPrefix : '') + '没有找到匹配的插件,换个说法试试'
+          : broadPrefix + `找到 ${items.length} 个候选,已对可安装的候选做装前体检。规则:带 ❌/[error] 硬伤的候选装了大概率用不了,别推荐安装,把问题如实告诉用户;带 ⚠️/[warn] 的提醒用户注意;✅ 的可以放心推荐。装完仍建议在插件市场点「一键检测」查与已装插件的冲突。` + (risky > 0 ? ` 本批有 ${risky} 个候选存在硬伤。` : '')
         return { items, notice }
       },
     })
@@ -988,7 +1013,9 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (rel && !rel.includes('*') && !rel.startsWith('http')) entries.add(canon(rel))
         if (entries.size >= 2) break
       }
-      const hostEntry = typeof meta.main === 'string' && meta.main ? meta.main : 'lib/index.js'
+      // 宿主入口优先取 main;没有 main(如 modlens 只有 exports)就取第一个
+      // exports 条目,而不是猜一个不存在的 lib/index.js。
+      const hostEntry = entries.size > 0 ? [...entries][0]! : 'lib/index.js'
       const wantPatch = meta.dsh?.bundle?.patch || ''
       // 网络探测全部并行:入口文件、挂载补丁、宿主入口、仓库元数据。
       const [missingEntries, patchMissing, hostText, repoMeta] = await Promise.all([
@@ -1056,6 +1083,39 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
         if (externals.size > 0) {
           checks.push({ level: 'warn', title: `运行时依赖外部程序:${[...externals].join('、')}`, detail: '这些命令不在 npm 依赖里,需要另外安装配置;没有它们插件装上了,对应功能也用不了。' })
+        }
+        // 宿主代码引用的相对文件必须真实存在于仓库。modlens 式坑:
+        // new URL('../dist/main.js', import.meta.url) 指向没提交的构建产物,
+        // 装完后运行时 spawn/import 一个不存在的文件,功能直接失效。
+        const refRe = /new URL\(['"]([^'"]+)['"],\s*import\.meta\.url\)|from\s+['"](\.\.?\/[^'"]+)['"]/g
+        const refs = new Set<string>()
+        let rm: RegExpExecArray | null
+        while ((rm = refRe.exec(hostText)) !== null) {
+          const ref = String(rm[1] || rm[2] || '')
+          if (ref && !ref.startsWith('http') && !ref.includes('*')) refs.add(resolveRel(dirname(hostEntry), ref))
+        }
+        const missingRefs: string[] = []
+        for (const ref of [...refs].slice(0, 3)) {
+          const fr = await this.ghGet(base + ref)
+          if (fr.status !== 200) missingRefs.push(ref)
+        }
+        if (missingRefs.length > 0) {
+          const engineLike = missingRefs.some((r) => /(?:^|\/)dist\//i.test(r) || /(?:main|cli|engine|server|worker|index)\.(?:m?js|cjs)$/i.test(r))
+          checks.push({
+            level: engineLike ? 'error' : 'warn',
+            title: `宿主代码引用的文件在仓库里不存在:${missingRefs.join('、')}`,
+            detail: engineLike
+              ? '入口代码引用了没提交到 git 的构建产物(常见 dist/main.js),装完后运行时 spawn/import 一个不存在的文件,插件功能直接失效。'
+              : '入口代码引用的资源文件不在仓库里,运行时读取可能报错。',
+          })
+        }
+        // 用户目录配置文件依赖:全新安装的用户没有这个文件时,功能通常用不了。
+        const cfgRe = /~\/\.[A-Za-z0-9._-]+/g
+        const cfgs = new Set<string>()
+        let cm: RegExpExecArray | null
+        while ((cm = cfgRe.exec(hostText)) !== null) cfgs.add(cm[0])
+        if (cfgs.size > 0) {
+          checks.push({ level: 'warn', title: `依赖用户目录配置文件:${[...cfgs].slice(0, 3).join('、')}`, detail: '插件要读用户目录下的配置文件;全新安装时这个文件不存在,功能可能直接失效,需要先按 README 生成配置。' })
         }
       }
       if (repoMeta) {
@@ -1362,6 +1422,30 @@ export class ZatMarketGateway extends TypertRemoteService {
     return { status: 0, body: '', error: lastError }
   }
 
+  /**
+   * GitHub 搜索优先走 token(配额 5000/h,模型连发查询也扛得住),失败再退回
+   * 匿名通道;成功的响应体缓存 10 分钟,相近的重复查询直接命中缓存。
+   */
+  private async ghSearch(url: string): Promise<{ status: number; body: string; error?: string }> {
+    const hit = this.searchCache.get(url)
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return { status: 200, body: hit.body }
+    let r: { status: number; body: string; error?: string } = { status: 0, body: '', error: '' }
+    const token = await this.resolveToken()
+    if (token) {
+      const path = url.slice('https://api.github.com'.length)
+      r = await this.ghApi('GET', path, token)
+    }
+    if (r.status !== 200) r = await this.ghGet(url)
+    if (r.status === 200) {
+      if (this.searchCache.size > 300) {
+        const first = this.searchCache.keys().next().value
+        if (first !== undefined) this.searchCache.delete(first)
+      }
+      this.searchCache.set(url, { at: Date.now(), body: r.body })
+    }
+    return r
+  }
+
   private async readProfile(): Promise<JsonObject> {
     const dir = await this.getProfileDir()
     return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
@@ -1637,7 +1721,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (catQuery) query += '+' + encodeQueryPart(catQuery)
       if (qText) query += '+' + encodeQueryPart(qText)
       const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
-      const r = await this.ghGet(url)
+      const r = await this.ghSearch(url)
       if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.status === 400 ? '。搜索词可能含特殊字符,换个说法试试' : ''}${r.error ? ' — ' + r.error : ''}。已依次尝试系统代理、直连、国内镜像 gh-proxy.com 和内置请求,全部失败。请确认网络可用;使用 VPN 时请用系统代理模式。` }
       let json: { items?: unknown[]; total_count?: number } | null = null
       try {

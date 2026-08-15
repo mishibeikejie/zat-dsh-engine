@@ -119,6 +119,19 @@ console.log(`  status=${pos.status} summary=${pos.summary}`)
 for (const c of pos.checks) console.log(`    [${c.level}] ${c.title} — ${c.detail}`)
 assert(pos.status === 'ok', '本仓库 → ok(入口/补丁/依赖全部正常)')
 
+console.log('\n== 真实案例:liustack/modlens(宿主代码引用未提交的 dist 引擎,期望 error)==')
+const mod = await gw.analyzeCandidateHealth('liustack', 'modlens', 'plugin')
+console.log(`  status=${mod.status} summary=${mod.summary}`)
+for (const c of mod.checks) console.log(`    [${c.level}] ${c.title} — ${c.detail.slice(0, 100)}`)
+assert(mod.status === 'error', 'modlens → error(dist 引擎缺失)')
+assert(mod.checks.some((c) => c.level === 'error' && /仓库里不存在/.test(c.title) && /dist/i.test(c.title)), 'modlens: 检出缺失的 dist 引擎文件')
+assert(mod.checks.some((c) => c.level === 'warn' && c.title.includes('配置文件')), 'modlens: 检出用户目录配置依赖')
+
+console.log('\n== 放宽搜索探针(topic 为空时自动全文兜底,信息展示)==')
+const probe = await toolDef.execute({ query: 'UI设计界面', limit: 3 })
+console.log(`  notice: ${probe.notice}`)
+for (const it of probe.items) console.log(`  - ${it.fullName} ★${it.stars} [${it.kind}] installable=${it.installable} health=${it.health.status}`)
+
 // ── 6. 真实搜索 + 体检 + 输出形状 ─────────────────────────────────────────
 const query = process.argv[2] || '视觉 图片识别 OCR'
 const limit = Number(process.argv[3]) || 5
