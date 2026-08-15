@@ -1682,8 +1682,8 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.ctx.get('workspaceRegistry') as unknown as { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined
   }
 
-  private get agentsFace(): { get(id: string): { status: string } | undefined } | undefined {
-    return this.ctx.get('agents') as unknown as { get(id: string): { status: string } | undefined } | undefined
+  private get agentsFace(): { get(id: string): { status: string; ctx?: { dispose?: () => unknown } } | undefined } | undefined {
+    return this.ctx.get('agents') as unknown as { get(id: string): { status: string; ctx?: { dispose?: () => unknown } } | undefined } | undefined
   }
 
   private get storageDomainFace(): { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown>; get(id: string): Promise<unknown> } } | undefined } | undefined {
@@ -1757,11 +1757,19 @@ export class ZatMarketGateway extends TypertRemoteService {
       const persistence = this.persistenceFace
       if (!persistence) return { ok: false, message: '当前环境不支持删除会话' }
       const agents = this.agentsFace
-      if (agents) {
-        const live = agents.get(id)
-        if (live !== undefined && live.status === 'running') {
-          return { ok: false, message: '这个会话正在运行,不能删除。等它跑完再删。' }
-        }
+      const agent = agents ? agents.get(id) : undefined
+      if (agent !== undefined && agent.status === 'running') {
+        return { ok: false, message: '这个会话正在运行,不能删除。等它跑完再删。' }
+      }
+      // An idle-but-attached session stays in ctx.sessions and keeps
+      // reappearing in the sidebar (drifting into the ungrouped bucket once
+      // its workspace slot is gone). Dispose the agent's scope first so the
+      // in-memory registry drops it for good.
+      if (agent !== undefined) {
+        try {
+          const agentCtx = agent.ctx
+          if (agentCtx && typeof agentCtx.dispose === 'function') agentCtx.dispose()
+        } catch { /* proceed with the file/accounting delete regardless */ }
       }
       const header = (await persistence.list()).find((c) => c.id === id)
       const registry = this.workspaceRegistryFace
