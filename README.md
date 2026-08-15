@@ -16,7 +16,12 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 - **Monorepo-aware install** — repositories that bundle several plugins install correctly: a single-plugin repo installs silently, multi-plugin repos offer a plain-language picker
 - **Installed detection** — marks plugins you already have, with version comparison and an **update badge** when a newer version is released
 - **Cross-platform** — full Windows and Linux support (PowerShell / sh, curl / wget, system-proxy aware)
-- **Network auto-adaptation** — inherits your VPN/system proxy for fetching and installing; if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover
+- **Network auto-adaptation** — inherits your VPN/system proxy for fetching and installing; if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover. **Works without a VPN**: proxy → direct → mirror → built-in fetch fallback
+- **One-click enable/disable** — toggle plugins right on the card (official core and the market itself are protected)
+- **Pre-install conflict gate + 🩺 health check** — blocking two marketplaces at once, official-package hijack, duplicate patch rows / registered names; one-click health report on conflicts and dependency issues
+- **Safe by default** — install/uninstall/toggle roll back automatically on failure; a last-known-good backup restores a broken profile with one command
+- **Live progress bar** — install/update/uninstall show a bar right on the card (percent + live counts); progress survives leaving and re-entering the market
+- **One-click star** — reuses your local git credentials to star repos; badge color legend, auto-fading notices
 - **Self-update** — a button appears beside the title when a newer version of the marketplace itself is available
 
 ## Installation
@@ -73,6 +78,20 @@ dsh plugin --profile web remove zat-dsh-engine
 **Why do I need a model for Chinese intros?** 999 intros ship with the plugin. Only plugins released after the snapshot are translated on the fly, using the model you selected in dsh.
 
 **Is the mirror safe?** The mirror is only used when a direct GitHub request fails, and only for public repository metadata.
+
+**dsh won't start after installing a plugin — how do I recover?** After every successful install/uninstall/toggle, the market backs up the last known-good state into the `zat-backup/` folder inside your profile directory. Restore it by copying the three files back over the profile directory (replace `<profile>` with your profile name):
+
+```sh
+# Windows (PowerShell)
+Copy-Item "$HOME\.dsh\profiles\<profile>\zat-backup\*" "$HOME\.dsh\profiles\<profile>\" -Force
+
+# macOS / Linux
+cp ~/.dsh/profiles/<profile>/zat-backup/* ~/.dsh/profiles/<profile>/
+```
+
+Then start dsh again. This restores the state right after the last successful operation, so the plugin that broke startup is removed from the enabled list and the profile boots normally.
+
+**Can I install two marketplace plugins at once?** No — the install gate blocks it: two market/manager plugins register the same settings pages and services, which can take dsh down. Uninstall the current one first if you want to switch.
 
 ## Changelog
 
