@@ -225,6 +225,27 @@ function simpleMajorConflict(range: string, installed: string): boolean {
   return Number.isFinite(want) && Number.isFinite(have) && want !== have
 }
 
+/**
+ * Compare two dotted versions (numeric triple, optional leading v).
+ * Returns -1 when a<b, 0 when equal, 1 when a>b. Unparseable versions fall
+ * back to numeric-aware string comparison.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (s: string): number[] | null => {
+    const m = String(s).trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/)
+    if (!m) return null
+    return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)]
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  if (!pa || !pb) return String(a).localeCompare(String(b), undefined, { numeric: true })
+  for (let i = 0; i < 3; i++) {
+    if (pa[i]! < pb[i]!) return -1
+    if (pa[i]! > pb[i]!) return 1
+  }
+  return 0
+}
+
 /** Subdirectory spec: nested path segments, no traversal, no shell chars. */
 function safeSubdir(value: string): string | null {
   const v = String(value || '').trim().replace(/^\/+/, '')
@@ -1912,8 +1933,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         const local = await this.localVersion(entry.name)
         const remote = await this.remoteVersion(entry.owner, entry.repo, entry.subdir)
         // Lower-case key: the client indexes with the GitHub full name in
-        // lower case, immune to owner/repo case drift in specs.
-        map[full.toLowerCase()] = { local, remote, hasUpdate: !!(local && remote && local !== remote) }
+        // lower case, immune to owner/repo case drift in specs. Only a strictly
+        // NEWER remote counts as an update — local ahead of remote (dev builds,
+        // unreleased tags) must never show a "downgrade" prompt.
+        map[full.toLowerCase()] = { local, remote, hasUpdate: !!(local && remote && compareVersions(remote, local) > 0) }
       }
     } catch { /* empty map */ }
     return { ok: true, map }
@@ -2032,11 +2055,25 @@ export class ZatMarketGateway extends TypertRemoteService {
         isHarness: Boolean(isHarness),
         harnessVersion: harnessLocal,
         harnessRemote,
-        harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && harnessLocal !== harnessRemote),
+        harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && compareVersions(harnessRemote, harnessLocal) > 0),
       }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
+  }
+
+  /** True when this market is installed from a local path (link:/file:/workspace:) — a dev checkout. */
+  private async isSelfLinkInstalled(): Promise<boolean> {
+    try {
+      const p = await this.readProfile()
+      const deps = (p.dependencies || {}) as Record<string, string>
+      for (const [name, spec] of Object.entries(deps)) {
+        if (name === 'zat-dsh-engine' || /zat-dsh-engine/i.test(String(spec))) {
+          if (/^(?:link|file|workspace):/i.test(String(spec))) return true
+        }
+      }
+    } catch { /* best effort */ }
+    return false
   }
 
   @Remote('selfupdate')
@@ -2044,9 +2081,25 @@ export class ZatMarketGateway extends TypertRemoteService {
     const parts = SELF_REPO.split('/')
     const owner = parts[0]!
     const repo = parts[1]!
+    // 本地链接安装 = 开发版:本地代码就是"最新",既不提示更新,也不允许
+    // 用 GitHub 版本覆盖(点一下就会把本地改动整个换掉,之前已经坑过一次)。
+    const devLink = await this.isSelfLinkInstalled()
+    if (devLink) {
+      return {
+        ok: !doUpdate,
+        hasUpdate: false,
+        current: SELF_VERSION,
+        latestVersion: null,
+        devLink: true,
+        message: doUpdate
+          ? '当前是本地链接安装(link:)的开发版,不能从 GitHub 覆盖更新;想换回 GitHub 版请先卸载再重装。'
+          : '当前是本地链接安装(link:)的开发版,市场不检查 GitHub 更新,本地代码即最新。',
+      }
+    }
     if (!doUpdate) {
       const remote = await this.remoteVersion(owner, repo)
-      if (!remote || remote === SELF_VERSION) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
+      // 只有远程严格更新才算更新;本地版本领先(未发布的开发版)绝不提示降级。
+      if (!remote || compareVersions(remote, SELF_VERSION) <= 0) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
       // Ship a short "what changed" summary with the update notice: the newest
       // changelog block from the zh README, capped at a few bullets.
       let changes: string[] = []

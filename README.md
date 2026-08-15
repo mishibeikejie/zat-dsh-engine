@@ -126,6 +126,7 @@ Each of these is the minimal permission set required for the market to work; if 
 - Network-target transparency: every candidate lists which external servers it talks to before you install it
 - Search now prefers the GitHub token (5000/h quota) and caches results for 10 minutes, so a model firing many queries no longer trips 403 rate limiting
 - When the dsh-plugin topic search is empty, it falls back to a broader full-text search (results still get health-checked)
+- Fix: no more "update to an older version" prompt when the local build is ahead of GitHub; a link-installed dev checkout never prompts for updates and refuses to be overwritten by the GitHub copy
 - The model now reports ❌/⚠️ candidates honestly instead of recommending plugins that look right but break in use
 
 ### v0.4.2

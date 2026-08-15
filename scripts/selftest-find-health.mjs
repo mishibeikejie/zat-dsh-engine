@@ -85,7 +85,7 @@ const fakeCtx = {
   baseUrl: join(home, 'profiles', 'web'),
 }
 
-const { ZatMarketGateway, scanSecurity } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
+const { ZatMarketGateway, scanSecurity, compareVersions } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
 const gw = new ZatMarketGateway(fakeCtx)
 if (!toolDef) throw new Error('tools.register 没有被调用 —— find_plugin 工具注册失败')
 
@@ -154,6 +154,19 @@ const hc = await gw.healthCheck()
 console.log(`  ok=${hc.ok} issues=${Array.isArray(hc.issues) ? hc.issues.length : 'n/a'}`)
 for (const it of (hc.issues || []).slice(0, 30)) console.log(`  [${it.level}] ${it.title} — ${String(it.detail || '').slice(0, 80)}`)
 assert(hc.ok === true, 'healthCheck 正常返回 ok:true')
+
+console.log('\n== 自更新防降级/防覆盖(本机 profile 是 link 安装)==')
+assert(compareVersions('0.4.3', '0.4.2') === 1, 'compareVersions: 0.4.3 > 0.4.2')
+assert(compareVersions('0.4.2', '0.4.3') === -1, 'compareVersions: 0.4.2 < 0.4.3')
+assert(compareVersions('v1.2.3', '1.2.3') === 0, 'compareVersions: v 前缀不影响')
+assert(compareVersions('1.10.0', '1.9.9') === 1, 'compareVersions: 按数字比,不是按字符串比')
+const su = await gw.selfupdate(false)
+console.log(`  selfupdate(false): hasUpdate=${su.hasUpdate} devLink=${su.devLink} message=${su.message}`)
+assert(su.hasUpdate === false, 'link 安装下不提示更新(本地 0.4.3 领先 GitHub 0.4.2,不提示降级)')
+assert(su.devLink === true, 'link 安装被识别为开发版')
+const suDo = await gw.selfupdate(true)
+console.log(`  selfupdate(true): ok=${suDo.ok} message=${suDo.message}`)
+assert(suDo.ok === false, 'link 安装下 selfupdate(true) 拒绝覆盖本地代码')
 
 // ── 6. 真实搜索 + 体检 + 输出形状 ─────────────────────────────────────────
 const query = process.argv[2] || '视觉 图片识别 OCR'
