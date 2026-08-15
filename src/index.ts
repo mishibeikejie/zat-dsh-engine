@@ -14,6 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
@@ -252,6 +253,108 @@ export class ZatMarketGateway extends TypertRemoteService {
     super(ctx, 'pluginMarket')
     this.subprocess = this.ctx.get('subprocess') as unknown as SubprocessFace
     this.llm = this.ctx.get('llm') as unknown as LlmFace | undefined
+    // Agent tool: the model can discover plugins by describing a need, then
+    // hand the user an install command — the same data the market uses.
+    const tools = this.ctx.get('tools') as unknown as { register(definition: unknown): () => void } | undefined
+    if (tools !== undefined) {
+      const hostCtx = this.ctx as unknown as { effect(callback: () => (() => void) | void, label?: string): unknown }
+      hostCtx.effect(() => {
+        const dispose = tools.register(this.buildFindPluginTool())
+        return () => dispose()
+      }, 'zat-market: find_plugin tool')
+    }
+  }
+
+  private buildFindPluginTool(): unknown {
+    return defineTool({
+      name: 'find_plugin',
+      description: '在 DeepSeek Harness 插件市场里按需求搜索插件(中文或英文)。返回候选列表:名称、星数、简介、中文简介、是否可直接安装和安装命令。用户描述一个能力需求时调用;用户选定后,用返回的 install 命令安装(装完提示重启 dsh),并建议用户在插件市场里点「一键检测」确认无冲突。',
+      parameters: {
+        query: { type: 'string', required: true, description: '能力需求,例如"OCR 截图转文字"或"终端 TUI"。' },
+        limit: { type: 'number', description: '最多返回几个候选,1-10,默认 5。' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            items: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  fullName: { type: 'string', required: true },
+                  name: { type: 'string', required: true },
+                  stars: { type: 'number' },
+                  description: { type: 'string' },
+                  zhIntro: { type: 'string' },
+                  kind: { type: 'string' },
+                  installable: { type: 'boolean' },
+                  install: { type: 'string' },
+                  url: { type: 'string' },
+                },
+              },
+            },
+            notice: { type: 'string' },
+          },
+        },
+        render: (_args, value) => {
+          const v = value as { items?: Array<Record<string, unknown>>; notice?: string }
+          const lines: string[] = []
+          for (const [i, it] of (v.items || []).entries()) {
+            const zh = it.zhIntro ? ` · ${String(it.zhIntro)}` : ''
+            const desc = String(it.description || '') + zh
+            lines.push(`${i + 1}. ${String(it.fullName)} — ${Number(it.stars)}★ [${String(it.kind)}]${it.installable ? ' 可安装' : ' 不可直接安装'}`)
+            if (desc.trim()) lines.push(`   ${desc.slice(0, 200)}`)
+            if (it.installable) lines.push(`   安装: ${String(it.install)}`)
+            lines.push(`   详情: ${String(it.url)}`)
+          }
+          if (v.notice) lines.push(String(v.notice))
+          return [{ type: 'text', text: lines.join('\n') }]
+        },
+      },
+      isConcurrencySafe: () => true,
+      execute: async (args) => {
+        const query = String((args as { query?: unknown }).query || '').trim()
+        const limitRaw = Number((args as { limit?: unknown }).limit)
+        const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(10, Math.floor(limitRaw))) : 5
+        if (!query) return { items: [], notice: '需求描述是空的,请说明想要什么功能的插件' }
+        const q = 'topic:dsh-plugin+' + encodeQueryPart(query)
+        const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=${limit}&page=1`
+        const r = await this.ghGet(url)
+        if (r.status !== 200) {
+          return { items: [], notice: `搜索失败(${r.status})${r.error ? ':' + r.error.slice(0, 120) : ''}。稍后再试,或换个说法。` }
+        }
+        let raw: unknown[] = []
+        try { raw = (JSON.parse(r.body) as { items?: unknown[] }).items ?? [] } catch { /* keep empty */ }
+        await this.loadZhCache()
+        const items = raw.slice(0, limit).map((entry) => {
+          const it = entry as { full_name?: string; name?: string; stargazers_count?: number; description?: string | null; html_url?: string }
+          const fullName = String(it.full_name || '')
+          const kind = this.kindOf(fullName.toLowerCase())
+          const cachedZh = this.zhCache.get(fullName.toLowerCase())
+          return {
+            fullName,
+            name: String(it.name || fullName),
+            stars: Number(it.stargazers_count || 0),
+            description: String(it.description || ''),
+            zhIntro: (cachedZh && cachedZh.zh) || '',
+            kind,
+            installable: kind === 'plugin' || kind === 'multi',
+            install: `dsh plugin --profile web add github:${fullName}`,
+            url: String(it.html_url || `https://github.com/${fullName}`),
+          }
+        })
+        return {
+          items,
+          notice: items.length === 0
+            ? '没有找到匹配的插件,换个说法试试'
+            : `找到 ${items.length} 个候选。installable=true 的可以直接用 install 命令安装,装完重启 dsh;建议装后在插件市场点「一键检测」。`,
+        }
+      },
+    })
   }
 
   // ── helpers ────────────────────────────────────────────────────────────

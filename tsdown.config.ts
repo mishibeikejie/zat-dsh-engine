@@ -33,6 +33,7 @@ const HOST_EXTERNALS = [
   '@deepseek-ai/dsh-subprocess',
   '@deepseek-ai/dsh-fs',
   '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-tools',
 ] as const
 
 export default defineConfig([
