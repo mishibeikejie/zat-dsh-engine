@@ -111,6 +111,7 @@ interface MarketSubpackage {
 
 interface SessionItem {
   id: string
+  title: string
   createdAt: number
   live: boolean
   subagent: boolean
@@ -283,6 +284,7 @@ const css = `
 .zat-srow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px}
 .zat-smeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .zat-sid{font-size:12px;color:var(--color-fg2,#c3ccdb);font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+.zat-stitle{font-size:13px;font-weight:600;color:var(--color-fg1,#eef1f7);overflow:hidden;text-overflow:ellipsis;max-width:220px;white-space:nowrap}
 .zat-stime{font-size:11.5px;color:var(--color-fg3,#7c8698)}
 .zat-tag{font-size:10.5px;padding:1px 8px;border-radius:10px;background:var(--color-bg3,#232a3a);color:var(--color-fg2,#a8b2c4)}
 .zat-tag-live{background:rgba(52,211,153,.15);color:#34d399}
@@ -378,7 +380,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [detail, setDetail] = useState<MarketItem | null>(null)
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
   const [notice, setNotice] = useState('')
-  const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string } | null>(null)
+  const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[] } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
@@ -583,7 +585,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   useEffect(() => {
     load(1, sort, '', category, false)
     void pm.selfupdate(false).then((r) => {
-      if (r.ok && r.value.ok && r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion })
+      if (r.ok && r.value.ok && r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
     }).catch(() => { /* best effort */ })
     void pm.installed().then((r) => {
       if (r.ok && r.value.ok) {
@@ -1044,18 +1046,25 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
-      {showLegend && (
-        <div className="zat-legend">
-          <span className="zat-lghead">{t('标签说明', 'Badge guide')}:</span>
-          <span className="zat-lgi"><i style={{ background: '#10b981' }} />✓ {t('已安装(已启用)', 'Installed (enabled)')}</span>
-          <span className="zat-lgi"><i style={{ background: '#0ea5e9' }} />↑ {t('有更新', 'Update available')}</span>
-          <span className="zat-lgi"><i style={{ background: '#7a4dff' }} />{t('安装', 'Install')}</span>
-          <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·不可安装', 'Skill · not installable')}</span>
-          <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
-          <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
-          <span className="zat-lgi"><i style={{ background: '#f5b942' }} />★ {t('已星标(点击切换)', 'Starred (click to toggle)')}</span>
-        </div>
-      )}
+      {showLegend && (selfUpdate && selfUpdate.changes && selfUpdate.changes.length > 0
+        ? (
+            <div className="zat-legend">
+              <span className="zat-lghead">↑ {t('更新 v', 'Update v')}{selfUpdate.latestVersion || ''}{t(' 内容:', ' — what changed:')}</span>
+              {selfUpdate.changes.map((c) => <span key={c} className="zat-lgi">· {c}</span>)}
+            </div>
+          )
+        : (
+            <div className="zat-legend">
+              <span className="zat-lghead">{t('标签说明', 'Badge guide')}:</span>
+              <span className="zat-lgi"><i style={{ background: '#10b981' }} />✓ {t('已安装(已启用)', 'Installed (enabled)')}</span>
+              <span className="zat-lgi"><i style={{ background: '#0ea5e9' }} />↑ {t('有更新', 'Update available')}</span>
+              <span className="zat-lgi"><i style={{ background: '#7a4dff' }} />{t('安装', 'Install')}</span>
+              <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·不可安装', 'Skill · not installable')}</span>
+              <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
+              <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
+              <span className="zat-lgi"><i style={{ background: '#f5b942' }} />★ {t('已星标(点击切换)', 'Starred (click to toggle)')}</span>
+            </div>
+          ))}
       {notice && <div className="zat-notice">{notice}</div>}
       {subChoices && (
         <div className="zat-subchoices">
@@ -1274,6 +1283,7 @@ function SessionManagerPanel({ pm, locale }: { pm: MarketRemote['pluginMarket'];
           {sessions.map((it) => (
             <div key={it.id} className="zat-srow">
               <span className="zat-smeta">
+                <span className="zat-stitle" title={it.id}>{it.title || t('(无标题)', '(untitled)')}</span>
                 <span className="zat-sid" title={it.id}>{it.id}</span>
                 <span className="zat-stime">{new Date(Number(it.createdAt)).toLocaleString()}</span>
                 {it.live && <span className="zat-tag zat-tag-live">{t('运行中', 'Running')}</span>}

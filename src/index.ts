@@ -1463,7 +1463,27 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!doUpdate) {
       const remote = await this.remoteVersion(owner, repo)
       if (!remote || remote === SELF_VERSION) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
-      return { ok: true, hasUpdate: true, current: SELF_VERSION, latestVersion: remote }
+      // Ship a short "what changed" summary with the update notice: the newest
+      // changelog block from the zh README, capped at a few bullets.
+      let changes: string[] = []
+      try {
+        const readme = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/README.zh.md`)
+        if (readme.status === 200) {
+          const lines = readme.body.split(/\r?\n/)
+          let inBlock = false
+          for (const line of lines) {
+            if (/^###\s+v/.test(line)) { inBlock = true; continue }
+            if (inBlock) {
+              if (/^##\s/.test(line) || /^###\s+/.test(line)) break
+              if (line.startsWith('- ')) {
+                changes.push(line.slice(2).trim())
+                if (changes.length >= 6) break
+              }
+            }
+          }
+        }
+      } catch { /* no changelog — the notice still shows the version */ }
+      return { ok: true, hasUpdate: true, current: SELF_VERSION, latestVersion: remote, changes }
     }
     const spec = 'github:' + owner + '/' + repo
     const dir = await this.getProfileDir()
@@ -1666,8 +1686,16 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.ctx.get('agents') as unknown as { get(id: string): { status: string } | undefined } | undefined
   }
 
-  private get storageDomainFace(): { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown> } } | undefined } | undefined {
-    return this.ctx.get('storageDomain') as unknown as { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown> } } | undefined } | undefined
+  private get storageDomainFace(): { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown>; get(id: string): Promise<unknown> } } | undefined } | undefined {
+    return this.ctx.get('storageDomain') as unknown as { get(name: string): { table: (name: string) => { delete(id: string): Promise<unknown>; get(id: string): Promise<unknown> } } | undefined } | undefined
+  }
+
+  private get sessionsRegistryFace(): { get(id: string): unknown } | undefined {
+    return this.ctx.get('sessions') as unknown as { get(id: string): unknown } | undefined
+  }
+
+  private get sessionTitleFace(): { get(session: unknown): { title?: string } | undefined } | undefined {
+    return this.ctx.get('sessionTitle') as unknown as { get(session: unknown): { title?: string } | undefined } | undefined
   }
 
   @Remote('listSessions')
@@ -1680,11 +1708,33 @@ export class ZatMarketGateway extends TypertRemoteService {
       const headers = await persistence.list()
       const archived = registry ? registry.archivedSessionIds : []
       const workspaces = registry ? registry.list() : []
+      const sessionsRegistry = this.sessionsRegistryFace
+      const titleService = this.sessionTitleFace
+      const domain = this.storageDomainFace?.get('session_projcache')
+      const projTable = domain?.table('sessions')
       const sessions: JsonObject[] = []
       for (const h of headers) {
         const live = Boolean(agents && agents.get(h.id) !== undefined && agents.get(h.id)!.status === 'running')
+        // Title: live sessions answer from the title service; cold sessions
+        // read the persisted projection-cache row (key 'title').
+        let title = ''
+        if (sessionsRegistry !== undefined && titleService !== undefined) {
+          const liveSession = sessionsRegistry.get(h.id)
+          if (liveSession !== undefined) {
+            const snap = titleService.get(liveSession)
+            if (snap && snap.title) title = String(snap.title)
+          }
+        }
+        if (!title && projTable !== undefined) {
+          try {
+            const row = await projTable.get(h.id) as { rows?: Record<string, { val?: unknown }> } | undefined
+            const t = row?.rows?.['title']?.val
+            if (typeof t === 'string' && t.trim()) title = t.trim()
+          } catch { /* no cache row — no title yet */ }
+        }
         sessions.push({
           id: h.id,
+          title,
           createdAt: h.createdAt || 0,
           live,
           subagent: Boolean(h.origin === 'subagent'),
