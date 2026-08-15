@@ -66,6 +66,12 @@ interface MarketJson {
   [key: string]: unknown
 }
 
+interface HealthIssue {
+  level: string
+  title: string
+  detail: string
+}
+
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'pluginMarket/list': (page: number, sort: string, q: string, category: string) => Promise<RemoteResult<MarketListResult>>
@@ -79,6 +85,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
+    'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     'pluginMarket/starredList': () => Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     'pluginMarket/setToken': (token: string) => Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -107,6 +114,7 @@ interface MarketRemote extends TypertClientRemote {
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
     setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
+    healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
     starredList(): Promise<RemoteResult<MarketJson & { starred?: string[] }>>
     setToken(token: string): Promise<RemoteResult<MarketJson & { hasToken?: boolean }>>
@@ -149,6 +157,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('update', ['owner', 'repo', 'subdir']),
   desc('uninstall', ['name']),
   desc('setEnabled', ['name', 'enabled']),
+  desc('healthCheck', []),
   desc('star', ['owner', 'repo']),
   desc('starredList', []),
   desc('setToken', ['token']),
@@ -233,6 +242,16 @@ const css = `
 .zat-legend .zat-lghead{font-weight:650;color:var(--color-fg2,#c3ccdb)}
 .zat-legend .zat-lgi{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .zat-legend .zat-lgi i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+.zat-hitem{background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px;padding:10px 14px}
+.zat-hitem.zat-h-error{border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.06)}
+.zat-hitem.zat-h-warn{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.06)}
+.zat-hitem.zat-h-ok{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.06)}
+.zat-htitle{font-size:13px;font-weight:650;margin-bottom:4px}
+.zat-h-error .zat-htitle{color:#f87171}
+.zat-h-warn .zat-htitle{color:#fbbf24}
+.zat-h-ok .zat-htitle{color:#34d399}
+.zat-h-info .zat-htitle{color:var(--color-fg2,#c3ccdb)}
+.zat-hdetail{font-size:12px;color:var(--color-fg2,#a8b2c4);line-height:1.6}
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
 .zat-detail{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;padding:2px}
 .zat-dcover{width:100%;max-width:480px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:var(--color-bg2,#1c2333);border:1px solid var(--color-border,#ffffff14)}
@@ -328,6 +347,8 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [showLegend, setShowLegend] = useState(true)
   const [hasToken, setHasToken] = useState<boolean | null>(null)
   const [tokenInput, setTokenInput] = useState('')
+  const [health, setHealth] = useState<HealthIssue[] | null>(null)
+  const [checking, setChecking] = useState(false)
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const starredSetRef = useRef<Set<string> | null>(null)
@@ -551,6 +572,18 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   /** Toggle a plugin between the enabled/disabled bundle list. */
+  function runHealth(): void {
+    setChecking(true)
+    void pm.healthCheck().then((res) => {
+      setChecking(false)
+      if (!res.ok || !res.value.ok) { setNotice(res.ok ? String(res.value.message || '') : res.error.message); return }
+      setHealth(Array.isArray(res.value.issues) ? (res.value.issues as HealthIssue[]) : [])
+    }).catch((err: unknown) => {
+      setChecking(false)
+      setNotice(String((err as { message?: string })?.message || err))
+    })
+  }
+
   function doSetEnabled(item: MarketItem, enabled: boolean): void {
     const name = item.installedName
     if (!name) return
@@ -700,6 +733,38 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     )
   }
 
+  if (health) {
+    const counts = { error: 0, warn: 0, info: 0, ok: 0 }
+    for (const it of health) { const c = counts as unknown as Record<string, number>; if (it.level in c) c[it.level] += 1 }
+    return (
+      <div className="zat-panel">
+        <div className="zat-bar">
+          <button className="zat-btn" onClick={() => setHealth(null)}>{t('← 返回市场', '← Back')}</button>
+          <span className="zat-title">
+            {t('插件体检报告', 'Health check')}
+            <small>
+              {counts.error > 0 && `${t('冲突', 'conflicts')} ${counts.error} · `}
+              {counts.warn > 0 && `${t('风险', 'warnings')} ${counts.warn} · `}
+              {counts.ok > 0 && t('通过', 'passed')}
+            </small>
+          </span>
+        </div>
+        <div className="zat-detail">
+          {health.map((it, i) => (
+            <div key={i} className={'zat-hitem zat-h-' + (it.level === 'error' ? 'error' : it.level === 'warn' ? 'warn' : it.level === 'ok' ? 'ok' : 'info')}>
+              <div className="zat-htitle">{it.title}</div>
+              <div className="zat-hdetail">{it.detail}</div>
+            </div>
+          ))}
+          <div className="zat-actions">
+            <button className="zat-btn" onClick={() => setHealth(null)}>{t('返回市场', 'Back to market')}</button>
+            <button className="zat-btn" onClick={runHealth} disabled={checking}>{checking ? t('检测中…', 'Checking…') : t('再测一次', 'Run again')}</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="zat-panel">
       <div className="zat-bar">
@@ -734,6 +799,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <option value="installable">{t('可安装', 'Installable')}</option>
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
+        <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
         <button className="zat-btn" onClick={() => setShowLegend((v) => !v)} title={t('标签颜色说明', 'Badge color guide')}>{t('🏷 图例', '🏷 Legend')}</button>
       </div>
       {showLegend && (

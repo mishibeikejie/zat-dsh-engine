@@ -14,7 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 import bundledKinds from '../data/kinds.json'
@@ -24,6 +24,17 @@ const IS_WIN = process.platform === 'win32'
 
 /** Repositories that ARE the DeepSeek Harness itself (never installable). */
 const HARNESS_REPOS = ['deepseek-ai/deepseek-harness']
+
+/**
+ * Marketplace / plugin-manager plugins. Two of these running at once
+ * register conflicting pages and services and crash the Web UI — a
+ * beginner trap that has already bricked real profiles. The install gate
+ * refuses to install a second one.
+ */
+const KNOWN_MARKET_REPOS: Record<string, string> = {
+  'mishibeikejie/zat-dsh-engine': 'zat-dsh-engine',
+  'lx2000wasd/dsh-web-plugin-manager': 'dsh-web-plugin-manager',
+}
 
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
@@ -146,6 +157,25 @@ function encodeQueryPart(s: string): string {
 function safeSegment(value: string): string {
   const v = String(value || '').trim()
   return /^[\w.-]+$/.test(v) ? v : ''
+}
+
+/** Extract loader row ids from a patch YAML text (line-based, tolerant). */
+function extractPatchIds(yaml: string): Set<string> {
+  const ids = new Set<string>()
+  for (const line of String(yaml).split(/\r?\n/)) {
+    const m = line.match(/(?:^|\s)id:\s*['"]?([^'"#,\s}]+)/)
+    if (m) ids.add(m[1])
+  }
+  return ids
+}
+
+/** True when a simple `^x`/`x`/`x.y`/`x.y.z` range wants a different major than installed. */
+function simpleMajorConflict(range: string, installed: string): boolean {
+  const m = String(range).trim().match(/^\^?(\d+)(?:\.\d+){0,2}$/)
+  if (!m) return false
+  const want = Number(m[1])
+  const have = Number(String(installed).split('.')[0])
+  return Number.isFinite(want) && Number.isFinite(have) && want !== have
 }
 
 /** Subdirectory spec: nested path segments, no traversal, no shell chars. */
@@ -299,6 +329,122 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.writeFileText(join(dir, f), content)
       }
     }
+  }
+
+  /**
+   * Keep a copy of the profile manifest files after every successful
+   * mutation. When a later plugin breaks the profile at startup, a beginner
+   * can restore this copy in one command — see the README recovery section.
+   */
+  private async saveLastKnownGood(): Promise<void> {
+    try {
+      const dir = await this.getProfileDir()
+      const backupDir = join(dir, 'zat-backup')
+      mkdirSync(backupDir, { recursive: true })
+      const snap = await this.snapshotProfile(dir)
+      for (const f of Object.keys(snap)) {
+        const content = snap[f]
+        if (content === null) {
+          try { unlinkSync(join(backupDir, f)) } catch { /* keep going */ }
+        } else {
+          await this.writeFileText(join(backupDir, f), content)
+        }
+      }
+    } catch { /* best effort — never break the main flow */ }
+  }
+
+  /**
+   * Refuse to install a second marketplace/manager plugin next to an
+   * existing one: two of them register conflicting pages and services and
+   * take the profile down. Returns a user-facing reason, or null to allow.
+   */
+  private async checkMarketConflict(owner: string, repo: string): Promise<string | null> {
+    const candidateRepo = (owner + '/' + repo).toLowerCase()
+    const candidatePkg = KNOWN_MARKET_REPOS[candidateRepo]
+    if (!candidatePkg) return null
+    try {
+      const p = await this.readProfile()
+      const inst = this.installedMap(p)
+      const conflicts: string[] = []
+      for (const rec of Object.values(inst)) {
+        if (rec.name === candidatePkg) continue // reinstall / update of the same plugin
+        const isMarket = KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined
+          || KNOWN_MARKET_REPOS[candidateRepo] !== undefined && Object.values(KNOWN_MARKET_REPOS).includes(rec.name)
+        if (isMarket) conflicts.push(rec.name)
+      }
+      if (conflicts.length > 0) {
+        return `已拦截安装:你的 profile 里已经装了市场/管理器类插件 ${conflicts.join('、')}。两个市场类插件同时存在会互相覆盖设置页、注册冲突,可能让 dsh 直接起不来(已经有人踩过这个坑)。想装这个,请先在市场里把原来的卸载掉;装完重启后如果再换回来,同样先卸载再装。`
+      }
+      return null
+    } catch {
+      return null // profile unreadable — let the install fail with its own diagnostics
+    }
+  }
+
+  private async installedVersionOf(name: string): Promise<string | null> {
+    try {
+      const dir = await this.getProfileDir()
+      return (JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { version?: string }).version || null
+    } catch { return null }
+  }
+
+  /** Every loader row id declared by an installed bundle, mapped to its package. */
+  private async installedPatchIds(): Promise<Map<string, string>> {
+    const map = new Map<string, string>()
+    try {
+      const dir = await this.getProfileDir()
+      const p = await this.readProfile()
+      const deps = Object.keys((p.dependencies || {}) as Record<string, string>)
+      for (const name of deps) {
+        try {
+          const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
+          if (!meta.dsh?.bundle?.patch) continue
+          const ids = extractPatchIds(readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8'))
+          for (const id of ids) if (!map.has(id)) map.set(id, name)
+        } catch { /* unreadable bundle — skip */ }
+      }
+    } catch { /* best effort */ }
+    return map
+  }
+
+  /**
+   * Pre-install conflict analysis against the candidate repo's manifest and
+   * patch. Hard problems block the install; soft problems become warnings.
+   */
+  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[] }> {
+    const block: string[] = []
+    const warn: string[] = []
+    const base = subdir ? `${subdir}/` : ''
+    const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
+    if (pkgRes.status !== 200) return { block, warn }
+    let meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
+    try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return { block, warn } }
+    // (1) Official packages must be peers, never direct deps — a direct dep
+    // installs a second copy and hijacks the official loader rows.
+    for (const d of Object.keys(meta.dependencies || {})) {
+      if (d.startsWith('@deepseek-ai/')) block.push(`把官方包 ${d} 写进了 dependencies(应改用 peerDependencies),会装出第二份拷贝并劫持官方 loader 行`)
+    }
+    // (2) Loader row id collisions with installed bundles.
+    if (meta.dsh?.bundle?.patch) {
+      const patchRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${meta.dsh.bundle.patch}`)
+      if (patchRes.status === 200) {
+        const candIds = extractPatchIds(patchRes.body)
+        const installed = await this.installedPatchIds()
+        for (const id of candIds) {
+          const holder = installed.get(id)
+          if (holder) block.push(`挂载行 id "${id}" 与已装插件 ${holder} 重复,加载时会发生冲突`)
+        }
+      }
+    }
+    // (3) Shared-dependency major-version mismatches.
+    for (const [dep, range] of [...Object.entries(meta.dependencies || {}), ...Object.entries(meta.peerDependencies || {})]) {
+      if (dep.startsWith('@deepseek-ai/')) continue
+      const installedVer = await this.installedVersionOf(dep)
+      if (installedVer && simpleMajorConflict(String(range), installedVer)) {
+        warn.push(`依赖 ${dep}:插件要求 ${range},本机已装 v${installedVer},大版本不一致`)
+      }
+    }
+    return { block, warn }
   }
 
   /**
@@ -680,13 +826,20 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { return null }
   }
 
-  private async addSpec(owner: string, repo: string, subdir?: string): Promise<{ ok: boolean; packageName: string | null; message?: string }> {
+  private async addSpec(owner: string, repo: string, subdir?: string): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
+    const gate = await this.checkMarketConflict(o, repoName)
+    if (gate) return { ok: false, packageName: null, message: gate }
+    const analysis = await this.analyzeCandidateConflicts(o, repoName, s || undefined)
+    if (analysis.block.length > 0) {
+      return { ok: false, packageName: null, message: '安装前检查发现硬冲突,已拦截:\n- ' + analysis.block.join('\n- ') + `\n确定仍要安装,请用官方命令强制安装(风险自负): dsh plugin --profile <你的profile> add ${spec}` }
+    }
+    const warnings = analysis.warn.length > 0 ? analysis.warn.join('; ') : undefined
     this.invalidateListCache()
     const snap = await this.snapshotProfile(dir)
     const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir)
@@ -735,7 +888,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.restoreProfile(dir, snap)
         return { ok: false, packageName: null, message: '安装成功但启用名单写入校验失败,已自动回滚到安装前状态。请重试或手动编辑 profile。' }
       }
-      return { ok: true, packageName: added }
+      await this.saveLastKnownGood()
+      return { ok: true, packageName: added, warning: warnings }
     }
     if (missingBundle) {
       return { ok: false, packageName: null, message: '安装完成,但该仓库没有声明 dsh.bundle,无法作为插件加载——它可能只是普通库或代码仓库,不是 dsh 插件。已作为普通依赖保留,重启也不会生效。' }
@@ -1048,7 +1202,7 @@ export class ZatMarketGateway extends TypertRemoteService {
               const only = sub.packages[0]!
               const res = await this.addSpec(o, r, only.dir)
               return res.ok
-                ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效` }
+                ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
                 : { ok: false, message: res.message }
             }
             return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
@@ -1058,7 +1212,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
       const res = await this.addSpec(o, r, s || undefined)
       return res.ok
-        ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r}${s ? `#path:${s}` : ''} — restart dsh to activate` }
+        ? { ok: true, packageName: res.packageName, message: `installed github:${o}/${r}${s ? `#path:${s}` : ''} — restart dsh to activate${res.warning ? '. 风险提示:' + res.warning : ''}` }
         : { ok: false, message: res.message }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -1075,7 +1229,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const res = await this.addSpec(o, r, s || undefined)
       const version = await this.remoteVersion(o, r, s || undefined)
       return res.ok
-        ? { ok: true, version, message: `updated github:${o}/${r}${s ? `#path:${s}` : ''} to v${version || '?'} — restart dsh to activate` }
+        ? { ok: true, version, message: `updated github:${o}/${r}${s ? `#path:${s}` : ''} to v${version || '?'} — restart dsh to activate${res.warning ? '. 风险提示:' + res.warning : ''}` }
         : { ok: false, message: res.message }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -1104,6 +1258,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
         await this.writeProfile(after)
       }
+      await this.saveLastKnownGood()
       return { ok: true, message: 'removed ' + n }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -1143,7 +1298,92 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.restoreProfile(dir, snap)
         return { ok: false, message: '启用名单写入校验失败,已自动回滚' }
       }
+      await this.saveLastKnownGood()
       return { ok: true, enabled, message: enabled ? `${n} 已启用 — 重启 dsh 后生效` : `${n} 已停用 — 重启 dsh 后生效` }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  /**
+   * One-click health scan of every installed plugin: hard conflicts
+   * (official deps, duplicate loader ids, multiple markets), soft risks
+   * (version majors, missing peers) and informational items.
+   */
+  @Remote('healthCheck')
+  async healthCheck(): Promise<JsonObject> {
+    const issues: Array<{ level: string; title: string; detail: string }> = []
+    try {
+      const dir = await this.getProfileDir()
+      const p = await this.readProfile()
+      const deps = Object.keys((p.dependencies || {}) as Record<string, string>)
+      const bundles = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
+        ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
+        : []
+      interface Scanned { name: string; meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
+      const scanned: Scanned[] = []
+      for (const name of deps) {
+        try {
+          const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as Scanned['meta']
+          let patchIds = new Set<string>()
+          if (meta.dsh?.bundle?.patch) {
+            try { patchIds = extractPatchIds(readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8')) } catch { /* no patch file */ }
+          }
+          scanned.push({ name, meta, patchIds })
+          for (const d of Object.keys(meta.dependencies || {})) {
+            if (d.startsWith('@deepseek-ai/')) issues.push({ level: 'error', title: `${name} 把官方包 ${d} 写进了 dependencies`, detail: '官方包应使用 peerDependencies 引用;直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。建议反馈给插件作者。' })
+          }
+          for (const pd of Object.keys(meta.peerDependencies || {})) {
+            const provided = deps.includes(pd) || (await this.installedVersionOf(pd)) !== null
+            if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: 'profile 关闭了自动安装 peer;这个依赖缺失时插件运行时可能报错。手动安装它或反馈给插件作者。' })
+          }
+          if (!bundles.includes(name) && !name.startsWith('@deepseek-ai/')) {
+            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单,重启后不会加载。可在市场卡片上点「启用」。' })
+          }
+        } catch {
+          issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。可能安装未完成,重装一次即可。' })
+        }
+      }
+      // Duplicate loader row ids across installed bundles.
+      const idHolders = new Map<string, string>()
+      for (const s of scanned) {
+        for (const id of s.patchIds) {
+          const holder = idHolders.get(id)
+          if (holder && holder !== s.name) {
+            issues.push({ level: 'error', title: `挂载行 id "${id}" 重复`, detail: `${holder} 和 ${s.name} 都声明了这个行 id,加载时会互相冲突,建议二选一。` })
+          } else if (!holder) {
+            idHolders.set(id, s.name)
+          }
+        }
+      }
+      // Shared-dependency major-version conflicts.
+      const declared = new Map<string, Array<{ pkg: string; range: string }>>()
+      for (const s of scanned) {
+        for (const [dep, range] of [...Object.entries(s.meta.dependencies || {}), ...Object.entries(s.meta.peerDependencies || {})]) {
+          if (dep.startsWith('@deepseek-ai/')) continue
+          if (!declared.has(dep)) declared.set(dep, [])
+          declared.get(dep)!.push({ pkg: s.name, range: String(range) })
+        }
+      }
+      for (const [dep, list] of declared) {
+        const majors = new Set<number>()
+        for (const item of list) {
+          const m = String(item.range).match(/^\^?(\d+)(?:\.\d+){0,2}$/)
+          if (m) majors.add(Number(m[1]))
+        }
+        if (majors.size > 1) {
+          issues.push({ level: 'warn', title: `依赖版本冲突:${dep}`, detail: list.map((x) => `${x.pkg} 要求 ${x.range}`).join(';') + '。大版本不一致时 pnpm 会装多份拷贝,宿主侧共享包可能出现状态分裂或报错。' })
+        }
+      }
+      // Multiple market/manager plugins.
+      const inst = this.installedMap(p)
+      const markets: string[] = []
+      for (const rec of Object.values(inst)) {
+        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name)) markets.push(rec.name)
+      }
+      if (markets.length > 1) issues.push({ level: 'error', title: '装了多个市场/管理器插件', detail: markets.join('、') + ' 会互相覆盖设置页并注册冲突,建议只保留一个。' })
+      if (issues.length === 0) issues.push({ level: 'ok', title: '体检通过', detail: '没有发现冲突、依赖矛盾或明显风险。' })
+      return { ok: true, issues }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }

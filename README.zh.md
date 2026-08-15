@@ -74,6 +74,22 @@ dsh plugin --profile web remove zat-dsh-engine
 
 **镜像安全吗?** 只有直连 GitHub 失败时才走镜像,而且只拉取公开仓库的元数据。
 
+**装了某个插件之后 dsh 起不来怎么办?** 市场每次成功安装/卸载/启停之后,都会把上一份可用状态自动备份到 profile 目录的 `zat-backup/` 文件夹。恢复只需把里面的三个文件复制回 profile 目录覆盖(把 `<你的profile名>` 换成实际名字):
+
+```sh
+# Windows (PowerShell)
+Copy-Item "$HOME\.dsh\profiles\<你的profile名>\zat-backup\*" "$HOME\.dsh\profiles\<你的profile名>\" -Force
+
+# macOS / Linux
+cp ~/.dsh/profiles/<你的profile名>/zat-backup/* ~/.dsh/profiles/<你的profile名>/
+```
+
+然后重新启动 dsh。恢复的是"上一次成功操作"之后的状态,那个把你带崩的插件会被移除出启用名单,profile 可以正常启动。
+
+**可以同时装两个市场类插件吗?** 不可以,安装时会被直接拦截:两个市场/管理器插件会注册相同的设置页和服务,互相覆盖甚至让 dsh 起不来。想换用另一个,先卸载当前这个。
+
+**安装前会自动检查冲突吗?** 会。每次安装前,市场自动检查三件事:① 官方包(`@deepseek-ai/*`)是否被写成普通依赖(会装出第二份拷贝劫持官方 loader,硬拦截);② 挂载行 id 是否与已装插件重复(硬拦截);③ 共享依赖的大版本是否与已装版本矛盾(不拦截,但会在结果里提示风险)。工具栏的「🩺 一键检测」可以随时对全部已装插件做一次同样的体检,报告冲突、依赖矛盾、缺失 peer 依赖、停用状态等。
+
 ## 赞助
 
 如果 Zat-DSH Engine 帮你省了时间,欢迎支持作者:
