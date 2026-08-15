@@ -160,7 +160,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.4.1'
+const SELF_VERSION = '0.4.2'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -408,16 +408,18 @@ export class ZatMarketGateway extends TypertRemoteService {
       const inst = this.installedMap(p)
       // Already installed? Then this is a reinstall / update of an existing
       // pair member — updating it must not be blocked (the pair is not new).
-      for (const rec of Object.values(inst)) {
+      // installedMap keys aliases of the SAME record under several names;
+      // dedupe by object identity so one package counts once.
+      for (const rec of new Set(Object.values(inst))) {
         if ((rec.owner + '/' + rec.repo).toLowerCase() === candidateRepo) return null
         if (candidatePkg && rec.name === candidatePkg) return null
       }
       const conflicts: string[] = []
-      for (const rec of Object.values(inst)) {
+      for (const rec of new Set(Object.values(inst))) {
         const isMarket = KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined
           || Object.values(KNOWN_MARKET_REPOS).includes(rec.name)
           || isMarketishName(rec.name)
-        if (isMarket) conflicts.push(rec.name)
+        if (isMarket && !conflicts.includes(rec.name)) conflicts.push(rec.name)
       }
       if (conflicts.length > 0) {
         return `已拦截:装了市场类插件 ${conflicts.join('、')},再装会互相冲突导致 dsh 起不来。想换用请先卸载它。`
@@ -567,7 +569,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const p = await this.readProfile()
       const inst = this.installedMap(p)
-      for (const rec of Object.values(inst)) {
+      for (const rec of new Set(Object.values(inst))) {
         if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) {
           return rec.name
         }
@@ -1878,7 +1880,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const inst = this.installedMap(p)
       const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean; installing?: boolean; taskId?: string }> = []
       const seen = new Set<string>()
-      for (const rec of Object.values(inst)) {
+      for (const rec of new Set(Object.values(inst))) {
         let owner = rec.owner
         let repo = rec.repo
         if (!owner || !repo) {
@@ -2127,8 +2129,10 @@ export class ZatMarketGateway extends TypertRemoteService {
       // Multiple market/manager plugins.
       const inst = this.installedMap(p)
       const markets: string[] = []
-      for (const rec of Object.values(inst)) {
-        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) markets.push(rec.name)
+      for (const rec of new Set(Object.values(inst))) {
+        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) {
+          if (!markets.includes(rec.name)) markets.push(rec.name)
+        }
       }
       if (markets.length > 1) issues.push({ level: 'error', title: '装了多个市场/管理器插件', detail: markets.join('、') + ' 会互相覆盖设置页并注册冲突,建议只保留一个。' })
       if (issues.length === 0) issues.push({ level: 'ok', title: '体检通过', detail: '没有发现冲突、依赖矛盾或明显风险。' })

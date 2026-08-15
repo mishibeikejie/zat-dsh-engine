@@ -105,6 +105,12 @@ Then start dsh again. This restores the state right after the last successful op
 
 ## Changelog
 
+### v0.4.2
+
+- Fix: health check falsely reported "multiple marketplace plugins" (aliased entries counted twice)
+- Fix: install/update auto-discovers pnpm (nvm, corepack and npm-global installs all work)
+- Update summary wraps instead of overflowing
+
 ### v0.4.1
 
 - New "Sessions" section (right below Agent Presets in Settings): lists every session with its title, one-click permanent delete, running/subagent sessions protected
