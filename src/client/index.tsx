@@ -743,7 +743,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·不可安装', 'Skill · not installable')}</span>
           <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
           <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
-          <span className="zat-lgi"><i style={{ background: '#f0a94b' }} />{t('已装·未启用', 'Installed, disabled')}</span>
           <span className="zat-lgi"><i style={{ background: '#f5b942' }} />★ {t('已星标(点击切换)', 'Starred (click to toggle)')}</span>
         </div>
       )}
