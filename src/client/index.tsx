@@ -222,6 +222,8 @@ const css = `
 .zat-cardbtn.zat-installed{background:var(--color-bg3,#1d2b21);color:#34d399;border:1px solid rgba(52,211,153,.35)}
 .zat-cardbtn.zat-noninstall{background:#3a2414;color:#fb923c;border:1px solid rgba(251,146,60,.4)}
 .zat-cardbtn.zat-disabled{background:#33271a;color:#f0a94b;border:1px solid rgba(240,169,75,.35)}
+.zat-mini{margin-left:auto;background:transparent;border:1px solid var(--color-border,#ffffff14);color:var(--color-fg3,#8b94a5);border-radius:6px;padding:0 8px;font-size:10.5px;line-height:18px;cursor:pointer;white-space:nowrap}
+.zat-mini:hover{color:#f87171;border-color:rgba(248,113,113,.4)}
 .zat-cardbtn.zat-nonplugin{background:var(--color-bg3,#22252e);color:var(--color-fg3,#8b94a5);border:1px solid var(--color-border,#ffffff14)}
 .zat-status{text-align:center;padding:40px 0;color:var(--color-fg3,#7c8698);font-size:13px}
 .zat-status.zat-error{color:#f87171}
@@ -765,7 +767,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {items && items.length === 0 && <div className="zat-status">{t('没有找到插件', 'No plugins found')}</div>}
         {items && items.length > 0 && filtered.length === 0 && <div className="zat-status">{t('当前筛选条件下没有插件', 'No plugins match filters')}</div>}
         {filtered.map((it) => (
-          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} onOpen={openDetail} onAction={cardAction} onStar={onStar} />
+          <MarketCard key={it.fullName} item={it} zh={zh} t={t} installing={installing === it.fullName} onOpen={openDetail} onAction={cardAction} onStar={onStar} onToggle={doSetEnabled} />
         ))}
         {loading && <div className="zat-loading">{t('正在加载…', 'Loading…')}</div>}
       </div>
@@ -801,6 +803,7 @@ interface MarketCardProps {
   onOpen: (item: MarketItem) => void
   onAction: (item: MarketItem) => void
   onStar: (item: MarketItem) => void
+  onToggle: (item: MarketItem, enabled: boolean) => void
 }
 
 /** A plugin can be disabled unless it is official core or the market itself. */
@@ -812,7 +815,7 @@ function canDisable(item: MarketItem): boolean {
   return true
 }
 
-function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar }: MarketCardProps) {
+function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
@@ -862,6 +865,15 @@ function MarketCard({ item, zh, t, installing, onOpen, onAction, onStar }: Marke
             {item.starred ? '★' : '☆'} {formatStars(item.stars)}
           </span>
           {item.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[item.language] || '#8b949e' }} /> {item.language}</span>}
+          {canDisable(item) && (
+            <button
+              className="zat-mini"
+              title={t('停用此插件,重启后不再加载', 'Disable — not loaded after restart')}
+              onClick={(e) => { e.stopPropagation(); onToggle(item, false) }}
+            >
+              {t('停用', 'Disable')}
+            </button>
+          )}
         </div>
         <button className={`zat-cardbtn ${btnClass}`} onClick={(e) => { e.stopPropagation(); onAction(item) }} disabled={!!installing}>{btnText}</button>
       </div>
