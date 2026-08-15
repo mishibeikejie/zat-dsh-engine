@@ -1794,6 +1794,18 @@ export class ZatMarketGateway extends TypertRemoteService {
         const domain = this.storageDomainFace?.get('session_projcache')
         if (domain) await domain.table('sessions').delete(id)
       } catch { /* a stale cache row is harmless */ }
+      // Drop any idle in-memory attachment so the sidebar row disappears
+      // immediately: DSH has no public close API, so use the store's own
+      // detach path (the owner fiber's later teardown is idempotent) and emit
+      // the disposal edge that pushes the host/session-removed frame.
+      const sessionsStore = this.ctx.get('sessions') as { get(sessionId: string): unknown; store?: Map<string, unknown> } | undefined
+      const liveSession = sessionsStore ? sessionsStore.get(id) : undefined
+      if (liveSession !== undefined && sessionsStore?.store !== undefined) {
+        try {
+          sessionsStore.store.delete(id)
+          ;(this.ctx as unknown as { emit(event: string, payload: unknown): void }).emit('session/disposed', liveSession)
+        } catch { /* best effort — a cold delete still works */ }
+      }
       return { ok: true, message: `已删除会话 ${id}${warning ? '。' + warning : ''}` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
