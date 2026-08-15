@@ -19,6 +19,7 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 - **Network auto-adaptation** — inherits your VPN/system proxy for fetching and installing; if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover. **Works without a VPN**: proxy → direct → mirror → built-in fetch fallback
 - **One-click enable/disable** — toggle plugins right on the card (official core and the market itself are protected)
 - **Pre-install conflict gate + 🩺 health check** — blocking two marketplaces at once, official-package hijack, duplicate patch rows / registered names; one-click health report on conflicts and dependency issues
+- **Pre-install health + security scan** — every candidate is checked before install (entry files, build artifacts, dependency style, network destinations); the security scan catches obfuscation, credential theft and suspicious exfiltration, with ❌ findings blocking the install; the AI plugin-finder reports the same results honestly
 - **Safe by default** — install/uninstall/toggle roll back automatically on failure; a last-known-good backup restores a broken profile with one command
 - **Live progress bar** — install/update/uninstall show a bar right on the card (percent + live counts); progress survives leaving and re-entering the market
 - **One-click star** — reuses your local git credentials to star repos; badge color legend, auto-fading notices
