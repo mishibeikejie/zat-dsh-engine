@@ -216,7 +216,9 @@ const css = `
 --color-fg1:var(--dsw-alias-label-primary,#e6e9ef);
 --color-fg2:var(--dsw-alias-label-secondary,#dbe2ee);
 --color-fg3:var(--dsw-alias-label-tertiary,#7c8698);
---color-border:var(--dsw-alias-border-l1,#ffffff14)}
+--color-border:var(--dsw-alias-border-l1,#ffffff14);
+--zat-accent:#4d6bfe;
+--zat-edge:rgba(77,107,254,.32)}
 .zat-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;background:var(--color-bg1,#121826);padding:4px 2px}
 .zat-title{font-size:15px;font-weight:700;color:var(--color-fg1,#eef1f7);white-space:nowrap}
 .zat-title small{font-size:11px;color:var(--color-fg3,#7c8698);font-weight:400;margin-left:6px}
@@ -231,13 +233,15 @@ const css = `
 .zat-btn:hover{background:var(--color-bg3,#2e3750)}
 .zat-btn.zat-primary{background:linear-gradient(90deg,#3d6bff,#7a4dff);border:none;color:#fff;font-weight:600}
 .zat-btn.zat-danger{background:#2a1a1e;color:#f87171;border:1px solid rgba(248,113,113,.4)}
+.zat-btn.zat-delete{background:rgba(77,107,254,.14);color:#6d8bff;border:1px solid rgba(77,107,254,.5)}
+.zat-btn.zat-delete:hover{background:rgba(77,107,254,.26);color:#93abff;border-color:rgba(77,107,254,.8)}
 .zat-btn.zat-danger:hover{background:#3a2026}
 .zat-btn.zat-update{background:linear-gradient(90deg,#0ea5e9,#22d3ee);border:none;color:#fff;font-weight:600}
 .zat-btn.zat-installed{background:var(--color-bg3,#1d2b21);color:#34d399;border:1px solid rgba(52,211,153,.35)}
 .zat-btn:disabled{opacity:.55;cursor:default}
 .zat-sel{background:var(--color-bg2,#181d28);color:var(--color-fg2,#dbe2ee);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:5px 8px;font-size:12.5px;outline:none;max-width:200px}
 .zat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:12px;overflow-y:auto;min-height:0;padding:2px}
-.zat-card{background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:12px;overflow:hidden;cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s;display:flex;flex-direction:column}
+.zat-card{background:var(--color-bg2,#151a24);border:1px solid var(--zat-edge);border-radius:12px;overflow:hidden;cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s;display:flex;flex-direction:column}
 .zat-card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.4);border-color:rgba(93,140,255,.4)}
 .zat-cover{position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#1c2333,#26304a);overflow:hidden}
 .zat-cover img{width:100%;height:100%;object-fit:cover;display:block}
@@ -288,7 +292,7 @@ const css = `
 .zat-loading{color:var(--color-fg3,#7c8698);font-size:12px;text-align:center;padding:8px}
 .zat-progress{margin:2px 0}
 .zat-cardprogress{margin-top:8px}
-.zat-srow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px}
+.zat-srow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--zat-edge);border-radius:10px}
 .zat-smeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .zat-sid{font-size:12px;color:var(--color-fg2,#c3ccdb);font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:280px}
 .zat-stitle{font-size:13px;font-weight:600;color:var(--color-fg1,#eef1f7);overflow:hidden;text-overflow:ellipsis;max-width:220px;white-space:nowrap}
@@ -1216,7 +1220,7 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
 
 // ── session manager panel (settings.section, right under Agent Presets) ──
 
-function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: () => void }) {
+function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: (deletedId: string) => void }) {
   const [zh, setZh] = useState(true)
   const [sessions, setSessions] = useState<SessionItem[] | null>(null)
   const [error, setError] = useState('')
@@ -1267,7 +1271,7 @@ function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote
       setNotice(res.ok ? String(res.value.message || '') : res.error.message)
       if (res.ok && res.value.ok) {
         reload()
-        refreshSessions()
+        refreshSessions(item.id)
       }
     }).catch((err: unknown) => {
       setBusy('')
@@ -1300,7 +1304,7 @@ function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote
                 {it.subagent && <span className="zat-tag">{t('子代理', 'Subagent')}</span>}
                 {it.archived && <span className="zat-tag">{t('已归档', 'Archived')}</span>}
               </span>
-              <button className="zat-btn zat-danger" onClick={() => remove(it)} disabled={!!busy || it.live || it.subagent}>
+              <button className="zat-btn zat-delete" onClick={() => remove(it)} disabled={!!busy || it.live || it.subagent}>
                 {busy === it.id ? t('删除中…', 'Deleting…') : t('删除', 'Delete')}
               </button>
             </div>
@@ -1313,7 +1317,7 @@ function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote
 
 // ── plugin ──────────────────────────────────────────────────────────────
 
-export const inject = ['slots', 'locale', 'remote']
+export const inject = ['slots', 'locale', 'remote', 'sessions']
 
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
   const dispose = await (ctx.remote as MarketRemote).$mount({ package: 'zat-dsh-engine', descriptors: marketDescriptors })
@@ -1342,9 +1346,13 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   ))
 
   // Conversation management: its own settings section, right below Agent Presets.
-  const refreshSessions = (): void => {
-    const svc = ctx.get('sessions') as { refresh(): Promise<void> } | undefined
-    if (svc) void svc.refresh().catch(() => { /* best effort — the panel list is still correct */ })
+  const refreshSessions = (deletedId: string): void => {
+    const svc = ctx.get('sessions') as { refresh: () => Promise<void>; clear: () => void; list?: { getSnapshot(): { current?: string } } } | undefined
+    if (!svc) return
+    try {
+      if (svc.list && svc.list.getSnapshot().current === deletedId) svc.clear()
+    } catch { /* best effort */ }
+    void svc.refresh().catch(() => { /* best effort */ })
   }
   slots.inject('settings.section', () => slots.register(
     {
@@ -1356,7 +1364,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
         const zh = snap?.active ? isZh(String(snap.active)) : true
         return zh ? '🗑 对话管理' : '🗑 Sessions'
       },
-      inject: (): { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: () => void } => ({ pm, locale, refreshSessions }),
+      inject: (): { pm: MarketRemote['pluginMarket']; locale: LocaleFace; refreshSessions: (deletedId: string) => void } => ({ pm, locale, refreshSessions }),
     },
     SessionManagerPanel,
   ))
