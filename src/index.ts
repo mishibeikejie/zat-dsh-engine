@@ -1293,7 +1293,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           kind,
           cover: 'https://opengraph.githubassets.com/1/' + fullName,
         } satisfies PluginListItem
-      })
+      }).filter((item) => item.fullName.toLowerCase() !== SELF_REPO) // hide the market's own card
       const data: MarketListResult = {
         ok: true,
         items,
@@ -1595,6 +1595,11 @@ export class ZatMarketGateway extends TypertRemoteService {
   async uninstall(name: string): Promise<JsonObject> {
     const n = safePackageName(name)
     if (!n) return { ok: false, message: 'invalid package name' }
+    // The market must not delete itself: even if a client finds a way past the
+    // hidden card, the host refuses. Removal stays possible via the official CLI.
+    if (n === 'zat-dsh-engine') {
+      return { ok: false, message: '市场不能卸载自己,已阻止。如需移除,请用官方命令: dsh plugin --profile <你的profile> remove zat-dsh-engine' }
+    }
     const taskId = this.launchTask(async (id) => {
       try {
         this.setTaskStep(id, 'uninstall', `正在卸载 ${n}…`)
@@ -1653,6 +1658,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
         if (!owner || !repo) continue // link:/unknown sources have no market card
         const key = (owner + '/' + repo).toLowerCase()
+        if (key === SELF_REPO) continue // the market's own card stays hidden
         if (seen.has(key)) continue
         seen.add(key)
         unique.push({ name: rec.name, owner, repo, enabled: rec.enabled })
