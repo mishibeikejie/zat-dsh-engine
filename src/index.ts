@@ -34,6 +34,12 @@ const HARNESS_REPOS = ['deepseek-ai/deepseek-harness']
 const KNOWN_MARKET_REPOS: Record<string, string> = {
   'mishibeikejie/zat-dsh-engine': 'zat-dsh-engine',
   'lx2000wasd/dsh-web-plugin-manager': 'dsh-web-plugin-manager',
+  'sanqi-normal/dsh-webui-market-plugin': '@sanqi-normal/dsh-webui-market-plugin',
+}
+
+/** Heuristic: does a package/repo name look like a market/manager plugin? */
+function isMarketishName(name: string): boolean {
+  return /(?:plugin|dsh|harness)[-_ .]*(?:market|manager)|(?:market|manager)[-_ .]*(?:plugin|dsh|harness)/i.test(String(name))
 }
 
 // ── minimal service faces (the real contracts come from the dsh services) ──
@@ -363,15 +369,19 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async checkMarketConflict(owner: string, repo: string): Promise<string | null> {
     const candidateRepo = (owner + '/' + repo).toLowerCase()
     const candidatePkg = KNOWN_MARKET_REPOS[candidateRepo]
-    if (!candidatePkg) return null
+    const candidateMarketish = isMarketishName(repo)
+    if (!candidatePkg && !candidateMarketish) return null
     try {
       const p = await this.readProfile()
       const inst = this.installedMap(p)
       const conflicts: string[] = []
       for (const rec of Object.values(inst)) {
-        if (rec.name === candidatePkg) continue // reinstall / update of the same plugin
+        // Reinstall / update of the same plugin is not a conflict.
+        if (rec.name === candidatePkg) continue
+        if ((rec.owner + '/' + rec.repo).toLowerCase() === candidateRepo) continue
         const isMarket = KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined
-          || KNOWN_MARKET_REPOS[candidateRepo] !== undefined && Object.values(KNOWN_MARKET_REPOS).includes(rec.name)
+          || Object.values(KNOWN_MARKET_REPOS).includes(rec.name)
+          || isMarketishName(rec.name)
         if (isMarket) conflicts.push(rec.name)
       }
       if (conflicts.length > 0) {
@@ -1465,7 +1475,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const inst = this.installedMap(p)
       const markets: string[] = []
       for (const rec of Object.values(inst)) {
-        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name)) markets.push(rec.name)
+        if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name)) markets.push(rec.name)
       }
       if (markets.length > 1) issues.push({ level: 'error', title: '装了多个市场/管理器插件', detail: markets.join('、') + ' 会互相覆盖设置页并注册冲突,建议只保留一个。' })
       if (issues.length === 0) issues.push({ level: 'ok', title: '体检通过', detail: '没有发现冲突、依赖矛盾或明显风险。' })
