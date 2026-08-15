@@ -278,6 +278,7 @@ const css = `
 .zat-legend{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px;background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px;padding:6px 12px;font-size:11px;color:var(--color-fg3,#9aa4b5)}
 .zat-legend .zat-lghead{font-weight:650;color:var(--color-fg2,#c3ccdb)}
 .zat-legend .zat-lgi{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.zat-legend .zat-lgwrap{white-space:normal;word-break:break-word;line-height:1.6;flex:1;min-width:0}
 .zat-legend .zat-lgi i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
 .zat-hitem{background:var(--color-bg2,#151a24);border:1px solid var(--color-border,#ffffff0f);border-radius:10px;padding:10px 14px}
 .zat-hitem.zat-h-error{border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.06)}
@@ -1092,7 +1093,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         ? (
             <div className="zat-legend">
               <span className="zat-lghead">↑ {t('更新 v', 'Update v')}{selfUpdate.latestVersion || ''}{t(' 内容:', ' — what changed:')}</span>
-              <span className="zat-lgi">{selfUpdate.changes.slice(0, 3).map((c) => c.replace(/[（(][^)）]*[)）]/g, '')).join('、')}{selfUpdate.changes.length > 3 ? t(' 等', ' …') : ''}</span>
+              <span className="zat-lgi zat-lgwrap">{selfUpdate.changes.slice(0, 3).map((c) => c.replace(/[（(][^)）]*[)）]/g, '')).join('、')}{selfUpdate.changes.length > 3 ? t(' 等', ' …') : ''}</span>
             </div>
           )
         : (

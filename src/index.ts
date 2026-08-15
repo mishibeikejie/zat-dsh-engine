@@ -747,6 +747,10 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async pnpmShell(command: string, dir: string, onProgress?: (accumulatedStdout: string) => void): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
     const mirrorWin = "$env:GIT_CONFIG_COUNT=1; $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; $env:GIT_CONFIG_VALUE_0='https://github.com/';"
     const mirrorLin = "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; export GIT_CONFIG_VALUE_0='https://github.com/';"
+    // `pnpm add/remove` calls come in as "pnpm <verb> …"; on Windows the
+    // spawned -NoProfile PowerShell may not have pnpm on PATH (nvm/corepack
+    // installs). Discover it first, then invoke through the resolved tool.
+    const body = command.replace(/^pnpm\s+/, '')
     let full: string
     if (IS_WIN) {
       const proxySetup = [
@@ -758,10 +762,22 @@ export class ZatMarketGateway extends TypertRemoteService {
         '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
         '};',
       ].join(' ')
+      const pnpmSetup = [
+        '$pnpm = Get-Command pnpm -ErrorAction SilentlyContinue;',
+        'if (-not $pnpm) {',
+        "  $cands = @((Join-Path $env:APPDATA 'npm\\pnpm.cmd'), (Join-Path $env:LOCALAPPDATA 'pnpm\\pnpm.cmd'), (Join-Path $env:ProgramFiles 'nodejs\\pnpm.cmd'));",
+        '  $nodeSrc = (Get-Command node -ErrorAction SilentlyContinue).Source;',
+        "  if ($nodeSrc) { $cands += (Join-Path (Split-Path $nodeSrc) 'pnpm.cmd') };",
+        '  $found = $cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;',
+        '  if ($found) { $env:PATH = (Split-Path $found) + \';\' + $env:PATH; $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue };',
+        '};',
+        'if (-not $pnpm) { $pnpm = \'corepack\'; $pnpmArgs = \'pnpm\' } else { $pnpmArgs = \'\' };',
+      ].join(' ')
+      const run = '& $pnpm $pnpmArgs ' + body
       if (this.directDown) {
-        full = proxySetup + mirrorWin + command
+        full = proxySetup + pnpmSetup + mirrorWin + run
       } else {
-        full = proxySetup + command + '; if ($LASTEXITCODE -ne 0) { ' + mirrorWin + command + ' }'
+        full = proxySetup + pnpmSetup + run + '; if ($LASTEXITCODE -ne 0) { ' + mirrorWin + run + ' }'
       }
     } else {
       full = this.directDown ? mirrorLin + command : command + ' || { ' + mirrorLin + command + ' }'
