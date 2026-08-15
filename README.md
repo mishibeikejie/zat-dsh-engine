@@ -121,14 +121,9 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ### v0.4.3
 
-- New **AI plugin finder**: say what you need in any conversation and the AI searches the market, recommends candidates, and reports each one's pre-install health + security scan — ❌/⚠️ findings are reported honestly instead of recommending plugins that look right but break in use
-- Checks include: missing entry files (dist not committed — breaks on load), missing mount patch, official packages written as direct deps, peer deps not installed locally, install scripts downloading external components, code depending on external binaries, and archived/stale repos
-- Also catches the "installs but is dead" class: host code referencing uncommitted build artifacts (e.g. modlens's dist/main.js) is a hard error; depending on a user-home config file (e.g. ~/.modlens) is a warning
-- Security scanning (pre-install health + install gate + one-click check): obfuscation/dynamic execution, reading SSH/cloud credentials/browser data, suspicious exfil endpoints (bot hooks, pastebins, raw IPs, throwaway domains), registry/scheduled-task/firewall modifications — error-level findings block the install
-- Network-target transparency: every candidate lists which external servers it talks to before you install it
-- Search now prefers the GitHub token (5000/h quota) and caches results for 10 minutes, so a model firing many queries no longer trips 403 rate limiting
-- When the dsh-plugin topic search is empty, it falls back to a broader full-text search (results still get health-checked)
-- Fix: no more "update to an older version" prompt when the local build is ahead of GitHub; a link-installed dev checkout never prompts for updates and refuses to be overwritten by the GitHub copy
+- New: say what you need in any chat and the AI finds plugins, with a pre-install health + security scan per candidate
+- The scan catches missing files, bad deps, credential theft, suspicious exfiltration — ❌ ones can't install
+- Fix: no more "update to an older version" prompts
 
 ### v0.4.2
 
