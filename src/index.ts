@@ -1133,7 +1133,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { return null }
   }
 
-  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
+  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[] }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
@@ -1142,7 +1142,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     const dir = await this.getProfileDir()
     const gate = await this.checkMarketConflict(o, repoName)
     if (gate) return { ok: false, packageName: null, message: gate }
-    const analysis = await this.analyzeCandidateConflicts(o, repoName, s || undefined)
+    const analysis = preAnalysis || await this.analyzeCandidateConflicts(o, repoName, s || undefined)
     if (analysis.block.length > 0) {
       return { ok: false, packageName: null, message: `安装已拦截:${analysis.block.join(';')}。确要强制安装请用官方命令。` }
     }
@@ -1556,8 +1556,15 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (holder && await this.analyzeMarketishCandidate(o, r, s || undefined)) {
           return { ok: false, packageName: null, message: `已拦截:装了市场类插件 ${holder},再装会互相冲突导致 dsh 起不来。想换用请先卸载它。` }
         }
+        const analysis = await this.analyzeCandidateConflicts(o, r, s || undefined)
+        if (analysis.block.length > 0) {
+          return { ok: false, packageName: null, message: `安装已拦截:${analysis.block.join(';')}。确要强制安装请用官方命令。` }
+        }
+        if (analysis.warn.length > 0) {
+          this.setTaskProgress(id, 10, `检查完成:发现风险 — ${analysis.warn.join('; ')}。不拦截,继续安装…`)
+        }
         this.setTaskStep(id, 'download', '正在下载安装包…(网络慢时可能较久,请稍候)')
-        const res = await this.addSpec(o, r, s || undefined, id)
+        const res = await this.addSpec(o, r, s || undefined, id, analysis)
         return res.ok
           ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, packageName: null, message: res.message }
@@ -1578,13 +1585,21 @@ export class ZatMarketGateway extends TypertRemoteService {
       const gate = await this.checkMarketConflict(o, r)
       if (gate) return { ok: false, message: gate }
       const taskId = this.launchTask(async (id) => {
+        this.setTaskStep(id, 'check', '正在做更新前检查(冲突/依赖)…')
+        const analysis = await this.analyzeCandidateConflicts(o, r, s || undefined)
+        if (analysis.block.length > 0) {
+          return { ok: false, message: `更新已拦截:${analysis.block.join(';')}。确要强制更新请用官方命令。` }
+        }
+        if (analysis.warn.length > 0) {
+          this.setTaskProgress(id, 10, `检查完成:发现风险 — ${analysis.warn.join('; ')}。不拦截,继续更新…`)
+        }
         this.setTaskStep(id, 'download', '正在下载新版本…(网络慢时可能较久,请稍候)')
-        const res = await this.addSpec(o, r, s || undefined, id)
+        const res = await this.addSpec(o, r, s || undefined, id, analysis)
         const version = await this.remoteVersion(o, r, s || undefined)
         return res.ok
           ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, message: res.message }
-      })
+      }, { owner: o, repo: r })
       return { ok: true, taskId }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -1680,10 +1695,15 @@ export class ZatMarketGateway extends TypertRemoteService {
         while (next < unique.length) {
           const rec = unique[next++]!
           const fullName = rec.owner + '/' + rec.repo
+          // Local truth first: the card must NEVER vanish because an API
+          // call failed or the rate limit kicked in. Enrich when possible.
+          let enriched: { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null } | null = null
           const repoRes = await this.ghGet(`https://api.github.com/repos/${fullName}`)
-          if (repoRes.status !== 200) continue
+          if (repoRes.status === 200) {
+            try { enriched = JSON.parse(repoRes.body) as typeof enriched } catch { enriched = null }
+          }
           try {
-            const it = JSON.parse(repoRes.body) as { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null }
+            const it: { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null } = enriched || {}
             const cachedZh = this.zhCache.get(fullName.toLowerCase())
             const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
             const item: JsonObject = {
