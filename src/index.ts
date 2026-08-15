@@ -178,7 +178,12 @@ const CATEGORY_QUERY: Record<string, string> = {
 }
 
 function encodeQueryPart(s: string): string {
-  return s.replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\s+/g, '+')
+  // Full percent-encoding keeps every character the user types (Chinese,
+  // %, &, #, +, …) inside the query value instead of breaking the URL or
+  // being parsed as a GitHub query operator. Quotes and backslashes are
+  // query operators with no useful literal meaning in a market search, so
+  // they degrade to spaces; otherwise GitHub answers "Validation Failed" 400.
+  return encodeURIComponent(String(s).replace(/["\\]/g, ' ')).replace(/%20/g, '+')
 }
 
 /** Reject anything that is not a plain GitHub owner/repo segment. */
@@ -1246,7 +1251,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (qText) query += '+' + encodeQueryPart(qText)
       const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
       const r = await this.ghGet(url)
-      if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.error ? ' — ' + r.error : ''}。已依次尝试系统代理、直连、国内镜像 gh-proxy.com 和内置请求,全部失败。请确认网络可用;使用 VPN 时请用系统代理模式。` }
+      if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.status === 400 ? '。搜索词可能含特殊字符,换个说法试试' : ''}${r.error ? ' — ' + r.error : ''}。已依次尝试系统代理、直连、国内镜像 gh-proxy.com 和内置请求,全部失败。请确认网络可用;使用 VPN 时请用系统代理模式。` }
       let json: { items?: unknown[]; total_count?: number } | null = null
       try {
         json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
