@@ -110,6 +110,8 @@ Then start dsh again. This restores the state right after the last successful op
 - The find_plugin recommendation tool now runs a pre-install health check on every candidate, so problems surface before the user installs anything
 - Checks include: missing entry files (dist not committed — breaks on load), missing mount patch, official packages written as direct deps, peer deps not installed locally, install scripts downloading external components, code depending on external binaries, and archived/stale repos
 - Also catches the "installs but is dead" class: host code referencing uncommitted build artifacts (e.g. modlens's dist/main.js) is a hard error; depending on a user-home config file (e.g. ~/.modlens) is a warning
+- Security scanning (pre-install health + install gate + one-click check): obfuscation/dynamic execution, reading SSH/cloud credentials/browser data, suspicious exfil endpoints (bot hooks, pastebins, raw IPs, throwaway domains), registry/scheduled-task/firewall modifications — error-level findings block the install
+- Network-target transparency: every candidate lists which external servers it talks to before you install it
 - Search now prefers the GitHub token (5000/h quota) and caches results for 10 minutes, so a model firing many queries no longer trips 403 rate limiting
 - When the dsh-plugin topic search is empty, it falls back to a broader full-text search (results still get health-checked)
 - The model now reports ❌/⚠️ candidates honestly instead of recommending plugins that look right but break in use

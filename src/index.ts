@@ -261,6 +261,89 @@ const HEALTH_MAX = 5
 /** 常见系统命令不算"外部依赖";其余被 spawn/resolveExecutable 调用的都提示。 */
 const COMMON_BINS = new Set(['node', 'npm', 'pnpm', 'yarn', 'npx', 'git', 'cmd', 'powershell', 'pwsh', 'sh', 'bash', 'curl', 'wget', 'tar', 'unzip', '7z', 'python', 'python3'])
 
+// ── 安全扫描(静态) ─────────────────────────────────────────────────────
+//
+// 前提:DSH 插件是跑在宿主进程里的任意代码,与 dsh 同权限,没有沙箱。
+// 静态扫描不能证明一个插件"安全",但能把三种危险摆到明面上:
+//   1. 混淆/动态执行 —— 正常插件不这么写;
+//   2. 偷凭据/外发数据 —— 读 ~/.ssh、浏览器数据、往粘贴板/机器人钩子发数据;
+//   3. 网络去向透明化 —— 装之前先看清楚它到底会连哪些服务器。
+
+/** 知名服务的域名:出现了不报警,只属于"正常业务去向"。 */
+const ALLOWED_HOSTS = new Set([
+  'github.com', 'api.github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com', 'githubusercontent.com', 'gh-proxy.com', 'gitee.com',
+  'deepseek.com', 'api.deepseek.com', 'platform.deepseek.com', 'chat.deepseek.com', 'status.deepseek.com',
+  'openai.com', 'api.openai.com', 'anthropic.com', 'api.anthropic.com', 'claude.ai',
+  'openrouter.ai', 'groq.com', 'api.groq.com', 'mistral.ai', 'api.mistral.ai', 'googleapis.com', 'generativelanguage.googleapis.com',
+  'huggingface.co', 'hf.co', 'npmjs.com', 'npmjs.org', 'registry.npmjs.org', 'unpkg.com', 'jsdelivr.net', 'cdn.jsdelivr.net',
+  'aliyuncs.com', 'aliyun.com', 'dashscope.aliyuncs.com', 'baidu.com', 'aip.baidubce.com', 'qcloud.com', 'tencentcloud.com', 'tencentcloudapi.com',
+  'siliconflow.cn', 'api.siliconflow.cn', 'bigmodel.cn', 'open.bigmodel.cn', 'moonshot.cn', 'api.moonshot.cn', 'deepinfra.com', 'api.deepinfra.com',
+  'volces.com', 'ark.cn-beijing.volces.com', 'zhipuai.cn', 'open.zhipuai.cn', 'qwen.ai', 'dashscope-intl.aliyuncs.com',
+  'localhost', '127.0.0.1', '0.0.0.0', '::1', 'example.com', 'w3.org', 'json-schema.org', 'schemastore.org', 'nodejs.org', 'crates.io', 'pypi.org',
+  // 库/文档类噪声域名(react-dom 错误链接、封面图 CDN 等),不构成"网络去向"。
+  'githubassets.com', 'opengraph.githubassets.com', 'avatars.githubusercontent.com', 'camo.githubusercontent.com', 'reactjs.org', 'react.dev', 'mozilla.org', 'developer.mozilla.org', 'mdn.io', 'jsfiddle.net', 'codepen.io', 'stackoverflow.com', 'typescriptlang.org',
+])
+
+/** 一次性域名/裸 IP/免费可疑顶级域 —— 正常插件不会把数据发到这里。 */
+function isSuspiciousHost(host: string): boolean {
+  const h = host.toLowerCase()
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return true
+  if (!h.includes('.')) return true
+  const tld = h.split('.').pop() || ''
+  if (['tk', 'ml', 'ga', 'cf', 'gq', 'top', 'xyz', 'cc', 'pw', 'click', 'link', 'buzz', 'monster', 'icu', 'lol', 'work', 'rest', 'ru', 'su'].includes(tld)) return true
+  return /pastebin|paste\.ee|termbin|0x0\.st|hastebin|requestbin|webhook|ngrok|serveo|localtunnel|trycloudflare|duckdns|nip\.io/i.test(h)
+}
+
+/** 收集代码文本里出现的全部外部主机(不含允许名单)。 */
+function extractHosts(text: string): string[] {
+  const hosts = new Set<string>()
+  const re = /https?:\/\/[A-Za-z0-9._-]+/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    let h = m[0].slice(m[0].indexOf('//') + 2).toLowerCase()
+    h = h.replace(/\.+$/, '')
+    if (h && !ALLOWED_HOSTS.has(h)) hosts.add(h)
+  }
+  return [...hosts]
+}
+
+/**
+ * 对一段插件代码做静态安全扫描。返回的 findings 里 error 级是"几乎不可能是
+ * 正常插件"的模式(安装门直接拦截);warn 级是透明度提示(装前人工确认)。
+ */
+export function scanSecurity(text: string, where: string): HealthIssue[] {
+  const out: HealthIssue[] = []
+  if (!text) return out
+  if (/\beval\s*\(|new\s+Function\s*\(|atob\s*\(|fromCharCode\s*\(\s*(?:\d+\s*,\s*){40,}|Buffer\.from\s*\(\s*['"][A-Za-z0-9+/=]{200,}/i.test(text)) {
+    out.push({ level: 'error', title: `${where}包含混淆/动态执行代码`, detail: '检测到 eval/new Function/超长 base64 块。正常插件不会这样写,混淆常用来藏恶意行为,建议不要安装。' })
+  }
+  // 读取敏感凭据文件:必须落在真实 I/O 调用的参数窗口里才算数。这样既不会
+  // 把翻译数据、README 说明里的词误报,也不会命中扫描器自身内置的规则字面量。
+  const ioRe = /(?:readFileSync|readFile|createReadStream|openSync|accessSync|statSync|copyFileSync|renameSync|cpSync|rmSync|existsSync|execSync|execFileSync|spawnSync|spawn)\s*\(/g
+  const sensPath = /~\/\.(?:ssh|aws)|\.git-credentials|id_rsa|id_ed25519|known_hosts|(?:AppData|Application Support)[^'"\n]{0,40}(?:Chrome|Edge|Firefox|Chromium)/i
+  let iom: RegExpExecArray | null
+  while ((iom = ioRe.exec(text)) !== null) {
+    if (sensPath.test(text.slice(iom.index, iom.index + 200))) {
+      out.push({ level: 'error', title: `${where}有读取敏感凭据的痕迹`, detail: '代码在读写文件/执行命令的同时引用了 SSH 私钥、云凭据、浏览器数据等敏感路径;插件功能几乎用不到这些,极可能是偷凭据,建议不要安装。' })
+      break
+    }
+  }
+  if (/discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|pastebin\.com|paste\.ee|termbin\.com|0x0\.st|hastebin\.com|webhook\.site|requestbin\.com/i.test(text)) {
+    out.push({ level: 'error', title: `${where}包含可疑的数据外发地址`, detail: '代码里有消息机器人钩子或匿名粘贴板地址,常被用来把数据静默发走,建议不要安装。' })
+  }
+  if (/reg\s+(?:add|import)|schtasks\s|netsh\s+firewall|Set-ItemProperty[^;]{0,60}Registry/i.test(text)) {
+    out.push({ level: 'warn', title: `${where}会修改系统设置(注册表/计划任务/防火墙)`, detail: '插件一般不需要动系统级配置;装前确认这是它功能的一部分。' })
+  }
+  const hosts = extractHosts(text)
+  const suspicious = hosts.filter((h) => isSuspiciousHost(h))
+  if (suspicious.length > 0) {
+    out.push({ level: 'error', title: `${where}可疑网络去向:${suspicious.slice(0, 5).join('、')}`, detail: '裸 IP、一次性域名或可疑顶级域,不像正规服务;插件可能把数据发往这里,建议不要安装。' })
+  } else if (hosts.length > 0) {
+    out.push({ level: 'warn', title: `${where}会连接外部服务:${hosts.slice(0, 10).join('、')}`, detail: '装之前确认这些服务器就是插件功能要用的;数量很多或和功能对不上时要警惕。' })
+  }
+  return out
+}
+
 export class ZatMarketGateway extends TypertRemoteService {
   static inject = ['subprocess']
 
@@ -306,7 +389,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   private buildFindPluginTool(): unknown {
     return defineTool({
       name: 'find_plugin',
-      description: '在 DeepSeek Harness 插件市场里按需求搜索插件(中文或英文)。返回候选列表:名称、星数、简介、中文简介、是否可直接安装、安装命令,以及每个候选的「装前体检」(health)结果——体检检查入口文件是否真的存在、挂载补丁是否缺失、官方依赖是否写错、peer 依赖本机是否有、安装脚本是否要联网下载、是否依赖外部命令、仓库是否归档/停更。用户描述一个能力需求时调用;用户选定后,用返回的 install 命令安装(装完提示重启 dsh),并建议用户在插件市场里点「一键检测」确认与已装插件没有冲突。重要:体检结果是让你判断"能不能推荐"用的——带 ❌/[error] 硬伤的候选,装了也大概率用不了,必须把问题如实告诉用户,不要盲目推荐安装。',
+      description: '在 DeepSeek Harness 插件市场里按需求搜索插件(中文或英文)。返回候选列表:名称、星数、简介、中文简介、是否可直接安装、安装命令,以及每个候选的「装前体检」(health)结果——体检检查入口文件是否真的存在、挂载补丁是否缺失、官方依赖是否写错、peer 依赖本机是否有、安装脚本是否要联网下载、是否依赖外部命令、仓库是否归档/停更,并对宿主和界面代码做安全扫描(混淆/动态执行、读取 SSH/云凭据/浏览器数据、可疑外发地址、外部网络去向清单)。用户描述一个能力需求时调用;用户选定后,用返回的 install 命令安装(装完提示重启 dsh),并建议用户在插件市场里点「一键检测」确认与已装插件没有冲突。重要:体检结果是让你判断"能不能推荐"用的——带 ❌/[error] 硬伤(包括安全问题)的候选,装了大概率用不了或根本不该装,必须把问题如实告诉用户,不要盲目推荐安装。',
       parameters: {
         query: { type: 'string', required: true, description: '能力需求,例如"OCR 截图转文字"或"终端 TUI"。' },
         limit: { type: 'number', description: '最多返回几个候选,1-10,默认 5。' },
@@ -934,6 +1017,16 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
     } catch { /* best effort */ }
+    // (6) Security scan: error-level patterns (obfuscation, credential theft,
+    // data-exfil endpoints) block the install; warn-level stays as warnings.
+    for (const sec of scanSecurity(f.hostText, '宿主代码')) {
+      if (sec.level === 'error') block.push(`安全:${sec.title}`)
+      else warn.push(sec.title)
+    }
+    for (const sec of scanSecurity(f.clientText, '界面代码')) {
+      if (sec.level === 'error') block.push(`安全:${sec.title}`)
+      else warn.push(sec.title)
+    }
     return { block, warn }
   }
 
@@ -1017,8 +1110,8 @@ export class ZatMarketGateway extends TypertRemoteService {
       // exports 条目,而不是猜一个不存在的 lib/index.js。
       const hostEntry = entries.size > 0 ? [...entries][0]! : 'lib/index.js'
       const wantPatch = meta.dsh?.bundle?.patch || ''
-      // 网络探测全部并行:入口文件、挂载补丁、宿主入口、仓库元数据。
-      const [missingEntries, patchMissing, hostText, repoMeta] = await Promise.all([
+      // 网络探测全部并行:入口文件、挂载补丁、宿主入口、界面入口、仓库元数据。
+      const [missingEntries, patchMissing, hostText, clientText, repoMeta] = await Promise.all([
         (async (): Promise<string[]> => {
           const miss: string[] = []
           for (const rel of entries) {
@@ -1036,6 +1129,13 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (kind !== 'plugin' && kind !== 'unknown') return ''
           const hr = await this.ghGet(base + hostEntry)
           return hr.status === 200 ? hr.body : ''
+        })(),
+        (async (): Promise<string> => {
+          // 界面代码同样要做安全扫描(它会注入浏览器,能碰 token)。
+          const clientRel = Object.values(meta.exports || {}).map((v) => typeof v === 'string' ? v : (v && typeof v === 'object' && typeof v.default === 'string' ? v.default : '')).find((rel) => rel && /client/i.test(rel))
+          if (!clientRel) return ''
+          const cr = await this.ghGet(base + canon(clientRel))
+          return cr.status === 200 ? cr.body : ''
         })(),
         (async (): Promise<{ archived?: boolean; disabled?: boolean; fork?: boolean; pushed_at?: string } | null> => {
           const token = await this.resolveToken()
@@ -1118,6 +1218,9 @@ export class ZatMarketGateway extends TypertRemoteService {
           checks.push({ level: 'warn', title: `依赖用户目录配置文件:${[...cfgs].slice(0, 3).join('、')}`, detail: '插件要读用户目录下的配置文件;全新安装时这个文件不存在,功能可能直接失效,需要先按 README 生成配置。' })
         }
       }
+      // 安全扫描:宿主代码 + 界面代码,error 级是危险模式,warn 级是透明度提示。
+      for (const f of scanSecurity(hostText, '宿主代码')) checks.push(f)
+      for (const f of scanSecurity(clientText, '界面代码')) checks.push(f)
       if (repoMeta) {
         if (repoMeta.disabled) checks.push({ level: 'error', title: '仓库已被 GitHub 停用', detail: 'git 安装会直接失败,不要推荐。' })
         if (repoMeta.archived) checks.push({ level: 'error', title: '仓库已归档(archived)', detail: '作者标记不再维护,出了问题不会修。' })
@@ -2577,6 +2680,19 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (installedVer && simpleMajorConflict(String(range), installedVer)) {
             issues.push({ level: 'warn', title: `${s.name} 与官方包 ${pd} 版本可能不兼容`, detail: `插件要求 ${range},本机是 v${installedVer}。大版本不一致时运行可能报错,建议等插件作者适配。` })
           }
+        }
+      }
+      // Security scan of every ENABLED third-party plugin's actual installed
+      // code (host + client). Official @deepseek-ai/* packages are skipped:
+      // they ship with the harness and the user cannot uninstall them.
+      for (const s of scanned) {
+        if (!s.enabled || s.name.startsWith('@deepseek-ai/')) continue
+        const texts = await this.readLocalTexts(s.name)
+        for (const f of scanSecurity(texts.hostText, `${s.name} 宿主代码`)) {
+          issues.push({ level: f.level, title: f.title, detail: f.detail })
+        }
+        for (const f of scanSecurity(texts.clientText, `${s.name} 界面代码`)) {
+          issues.push({ level: f.level, title: f.title, detail: f.detail })
         }
       }
       // Multiple market/manager plugins.
