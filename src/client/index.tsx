@@ -265,7 +265,7 @@ const css = `
 .zat-topics{display:flex;flex-wrap:wrap;gap:6px}
 .zat-topic{background:var(--color-bg3,#1c2436);color:#8ea6e8;border:1px solid rgba(93,140,255,.25);border-radius:14px;padding:2px 10px;font-size:11px}
 .zat-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.zat-notice{color:#fbbf24;font-size:12.5px;padding:4px 0}
+.zat-notice{color:#fbbf24;font-size:12.5px;padding:4px 0;white-space:pre-wrap;line-height:1.6}
 .zat-zhlabel{color:#9fc1ff;font-size:11px;font-weight:600;margin-right:4px}
 .zat-monobadge{background:#3a2a1a;color:#fbbf24;border:1px solid rgba(251,191,36,.35);border-radius:8px;padding:6px 12px;font-size:12px;display:inline-block}
 .zat-subchoices{background:var(--color-bg2,#151a24);border:1px solid rgba(251,191,36,.35);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
@@ -432,6 +432,13 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     })
     return () => { off?.() }
   }, [locale])
+
+  // Notices auto-fade so a stale message never sticks to the panel.
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 12000)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   useEffect(() => {
     const dispose = injectCss()

@@ -381,11 +381,51 @@ export class ZatMarketGateway extends TypertRemoteService {
     }
   }
 
-  private async installedVersionOf(name: string): Promise<string | null> {
+  /**
+   * Roots where a module may actually live: the profile's own node_modules,
+   * the `profiles/node_modules` installation fallback (where DSH's own
+   * @deepseek-ai packages sit), and every node_modules above ctx.baseUrl
+   * (the installation/app layout, e.g. react under apps/web).
+   */
+  private async resolveModuleRoots(): Promise<string[]> {
+    const roots: string[] = []
     try {
       const dir = await this.getProfileDir()
-      return (JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { version?: string }).version || null
-    } catch { return null }
+      roots.push(join(dir, 'node_modules'))
+      roots.push(join(dirname(dir), 'node_modules'))
+    } catch { /* profile dir unknown — installation roots still help */ }
+    try {
+      const start = this.ctx.baseUrl as string | undefined
+      if (start) {
+        let current = start
+        for (let i = 0; i < 8; i++) {
+          roots.push(join(current, 'node_modules'))
+          const parent = dirname(current)
+          if (parent === current) break
+          current = parent
+        }
+      }
+    } catch { /* best effort */ }
+    return roots
+  }
+
+  private async installedVersionOf(name: string): Promise<string | null> {
+    for (const root of await this.resolveModuleRoots()) {
+      try {
+        const pkg = JSON.parse(readFileSync(join(root, name, 'package.json'), 'utf8')) as { version?: string }
+        if (pkg.version) return pkg.version
+      } catch { /* next root */ }
+    }
+    return null
+  }
+
+  /** True when a module is reachable through the profile or the installation. */
+  private async moduleProvided(name: string): Promise<boolean> {
+    try {
+      const p = await this.readProfile()
+      if (Object.keys((p.dependencies || {}) as Record<string, string>).includes(name)) return true
+    } catch { /* fall through to filesystem roots */ }
+    return (await this.installedVersionOf(name)) !== null
   }
 
   /** Every loader row id declared by an installed bundle, mapped to its package. */
@@ -1373,7 +1413,7 @@ export class ZatMarketGateway extends TypertRemoteService {
             if (d.startsWith('@deepseek-ai/')) issues.push({ level: 'error', title: `${name} 把官方包 ${d} 写进了 dependencies`, detail: '官方包应使用 peerDependencies 引用;直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。建议反馈给插件作者。' })
           }
           for (const pd of Object.keys(meta.peerDependencies || {})) {
-            const provided = deps.includes(pd) || (await this.installedVersionOf(pd)) !== null
+            const provided = await this.moduleProvided(pd)
             if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: 'profile 关闭了自动安装 peer;这个依赖缺失时插件运行时可能报错。手动安装它或反馈给插件作者。' })
           }
           if (!bundles.includes(name) && !name.startsWith('@deepseek-ai/')) {
