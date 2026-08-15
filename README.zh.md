@@ -79,8 +79,6 @@ dsh plugin --profile web remove zat-dsh-engine
 如果 Zat-DSH Engine 帮你省了时间,欢迎支持作者:
 
 - GitHub Sponsors:<https://github.com/sponsors/mishibeikejie>
-- 爱发电 / Afdian(填你的链接)
-- 微信 / 支付宝赞赏码(放你的二维码图片)
 
 每一份支持都会用于维护目录数据、翻译和功能更新。
 

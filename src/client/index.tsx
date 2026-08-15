@@ -172,7 +172,7 @@ function isZh(id: string): boolean {
 
 const css = `
 .zat-panel{display:flex;flex-direction:column;gap:12px;height:100%;min-height:0;color:var(--color-fg1,#e6e9ef);font-family:inherit}
-.zat-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.zat-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;background:var(--color-bg1,#121826);padding:4px 2px}
 .zat-title{font-size:15px;font-weight:700;color:var(--color-fg1,#eef1f7);white-space:nowrap}
 .zat-title small{font-size:11px;color:var(--color-fg3,#7c8698);font-weight:400;margin-left:6px}
 .zat-updbtn{background:linear-gradient(90deg,#0ea5e9,#22d3ee);border:none;color:#fff;font-weight:600;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
@@ -266,6 +266,7 @@ function injectCss(): () => void {
 
 const CATEGORIES: Array<{ label: string; en: string }> = [
   { label: '全部', en: 'All' },
+  { label: '可安装', en: 'Installable' },
   { label: '皮肤 / 主题', en: 'Theme' },
   { label: '工具 / 终端', en: 'Tools' },
   { label: '浏览器 / 自动化', en: 'Browser' },
@@ -589,6 +590,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const filtered = items ? items.filter((it) => {
     if (instFilter === 'installed' && !(it.installed || it.disabled)) return false
     if (instFilter === 'uninstalled' && (it.installed || it.disabled)) return false
+    if (category === '可安装' && it.kind !== 'plugin' && it.kind !== 'multi') return false
     return true
   }) : []
 

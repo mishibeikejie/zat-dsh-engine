@@ -79,8 +79,6 @@ dsh plugin --profile web remove zat-dsh-engine
 If Zat-DSH Engine saves you time, consider supporting the author:
 
 - GitHub Sponsors: <https://github.com/sponsors/mishibeikejie>
-- 爱发电 / Afdian (add your link)
-- WeChat / Alipay QR codes (add your QR images)
 
 Every bit of support keeps the catalog data, translations and feature updates coming.
 
