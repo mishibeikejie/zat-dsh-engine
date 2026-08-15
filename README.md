@@ -105,6 +105,13 @@ Then start dsh again. This restores the state right after the last successful op
 
 ## Changelog
 
+### v0.4.1
+
+- New "Sessions" section (right below Agent Presets in Settings): lists every session with its title, one-click permanent delete, running/subagent sessions protected
+- Fix: searching Chinese or special characters returned 400
+- Fix: the update button gave no feedback — now a live progress bar with a completion notice
+- Fix: deleted sessions left a stale "ungrouped" entry in the sidebar
+
 ### v0.4.0
 
 - Enable/disable plugins in one click, right on the card (official core and the market itself are protected)
