@@ -1298,7 +1298,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         await this.writeProfile(after)
       }
       await this.saveLastKnownGood()
-      return { ok: true, message: 'removed ' + n }
+      return { ok: true, message: `已卸载 ${n} — 重启 dsh 后不再加载` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }

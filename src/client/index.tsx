@@ -611,7 +611,10 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setInstalling('')
       const value = res.ok ? res.value : null
       setNotice(res.ok ? String(value?.message || '') : res.error.message)
-      if (res.ok && value?.ok) refreshItem(item.fullName, { installed: false, installedName: null, hasUpdate: false, installedVersion: null, latestVersion: null })
+      if (res.ok && value?.ok) {
+        refreshItem(item.fullName, { installed: false, disabled: false, installedName: null, hasUpdate: false, installedVersion: null, latestVersion: null })
+        setDetail(null)
+      }
     }).catch((err: unknown) => {
       setInstalling('')
       setNotice(String((err as { message?: string })?.message || err))
