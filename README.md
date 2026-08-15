@@ -74,6 +74,18 @@ dsh plugin --profile web remove zat-dsh-engine
 
 **Is the mirror safe?** The mirror is only used when a direct GitHub request fails, and only for public repository metadata.
 
+## Changelog
+
+### v0.4.0
+
+- Enable/disable plugins in one click, right on the card (official core and the market itself are protected)
+- Pre-install conflict gate (market-vs-market, official-package hijack, duplicate patch rows / registered names) + one-click health check
+- Auto-rollback on install/uninstall/toggle; last-known-good backup restores a broken profile with one command
+- Live progress bar on the card (percent + live pnpm counts) that survives leaving and re-entering the market
+- Works without a VPN: system proxy → direct → China mirror → built-in fetch fallback; mirror ≈7 MB/s
+- Installed/installable filters served in one shot; paged results deduped
+- One-click star, badge color legend, auto-fading notices
+
 ## Sponsor
 
 If Zat-DSH Engine saves you time, consider supporting the author:
