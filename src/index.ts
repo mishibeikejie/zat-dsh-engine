@@ -2842,6 +2842,16 @@ export class ZatMarketGateway extends TypertRemoteService {
    * (official deps, duplicate loader ids, multiple markets), soft risks
    * (version majors, missing peers) and informational items.
    */
+  /** pnpm 是否可用(装/更新/修复都靠它)。 */
+  private async pnpmAvailable(): Promise<boolean> {
+    try { await this.subprocess.resolveExecutable('pnpm'); return true } catch { /* not on PATH */ }
+    try { await this.subprocess.resolveExecutable('corepack'); return true } catch { /* no corepack */ }
+    for (const cand of [join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'), join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'), join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd')]) {
+      if (existsSync(cand)) return true
+    }
+    return false
+  }
+
   @Remote('healthCheck')
   async healthCheck(): Promise<JsonObject> {
     const issues: Array<{ level: string; title: string; detail: string; fixable?: boolean }> = []
@@ -2853,17 +2863,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
         : []
       // pnpm 可用性:装/更新/修复都靠它。
-      let pnpmOk = false
-      try { await this.subprocess.resolveExecutable('pnpm'); pnpmOk = true } catch { /* not on PATH */ }
-      if (!pnpmOk) {
-        try { await this.subprocess.resolveExecutable('corepack'); pnpmOk = true } catch { /* no corepack */ }
-      }
-      if (!pnpmOk) {
-        for (const cand of [join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'), join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'), join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd')]) {
-          if (existsSync(cand)) { pnpmOk = true; break }
-        }
-      }
-      if (!pnpmOk) issues.push({ level: 'error', title: '没装 pnpm', detail: '装/更新插件都靠它。解决:终端里跑一条 corepack enable(或 npm i -g pnpm)。' })
+      const pnpmOk = await this.pnpmAvailable()
+      if (!pnpmOk) issues.push({ level: 'error', title: '没装 pnpm', detail: '装/更新插件都靠它。解决:点「一键修复」会自动装,或终端跑 corepack enable / npm i -g pnpm。', fixable: true })
       // 网络:连不上 GitHub,装/更新插件就都干不了。
       const netProbe = await this.ghGet('https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/HEAD/package.json')
       if (netProbe.status === 0) issues.push({ level: 'error', title: '连不上 GitHub', detail: '装/更新插件拉不到代码。解决:开 VPN/系统代理,或确认网络后再试。' })
@@ -3025,6 +3026,16 @@ export class ZatMarketGateway extends TypertRemoteService {
       const deps = Object.keys((p.dependencies || {}) as Record<string, string>)
       const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
       const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
+      // 0) 没 pnpm 就先装:corepack enable 优先(快、不联网),不行再 npm i -g pnpm。
+      if (!(await this.pnpmAvailable())) {
+        let installed = false
+        for (const cmd of ['corepack enable', 'npm install -g pnpm']) {
+          const r = await this.runShell(cmd)
+          if (r.outcome.exitCode === 0) { installed = true; break }
+        }
+        if (installed && await this.pnpmAvailable()) fixed.push('已装好 pnpm')
+        else remaining.push('没装 pnpm,本机也装不了(corepack/npm 都没有);请先装 Node.js 再点一次。')
+      }
       // 1) 装了但没启用的第三方插件 → 启用。
       const toEnable: string[] = []
       for (const name of deps) {
