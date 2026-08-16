@@ -127,7 +127,7 @@ Each of these is the minimal permission set required for the market to work; if 
 - Category search fixed (no more 422) + search-term hardening (OR/symbols/Chinese all work) + auto mirror on rate limit
 - Install/update now falls back to two mirrors (gh-proxy + ghfast), so it works without a VPN; triple-retry updates, no more false downgrade prompts
 - Security scan only warns (no false positives, notification plugins no longer flagged); every error is now one line: what went wrong + how to fix
-- npm/locally-installed plugins are visible and manageable in "Installed"; install and detail show "how to use"
+- npm/locally-installed plugins are visible, manageable, update-checkable (via the npm registry) and updatable in "Installed"; install and detail show "how to use"
 
 ### v0.4.4
 
