@@ -160,6 +160,8 @@ assert(compareVersions('0.4.3', '0.4.2') === 1, 'compareVersions: 0.4.3 > 0.4.2'
 assert(compareVersions('0.4.2', '0.4.3') === -1, 'compareVersions: 0.4.2 < 0.4.3')
 assert(compareVersions('v1.2.3', '1.2.3') === 0, 'compareVersions: v 前缀不影响')
 assert(compareVersions('1.10.0', '1.9.9') === 1, 'compareVersions: 按数字比,不是按字符串比')
+assert(gw.mirrorSpecFor('github:a/b') === 'https://gh-proxy.com/https://github.com/a/b.git', 'mirrorSpecFor: 基本转换')
+assert(gw.mirrorSpecFor('github:a/b#path:c/d') === 'https://gh-proxy.com/https://github.com/a/b.git#path:c/d', 'mirrorSpecFor: 保留子目录')
 const su = await gw.selfupdate(false)
 console.log(`  selfupdate(false): hasUpdate=${su.hasUpdate} devLink=${su.devLink} message=${su.message}`)
 assert(su.hasUpdate === false, 'link 安装下不提示更新(本地 0.4.3 领先 GitHub 0.4.2,不提示降级)')

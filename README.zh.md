@@ -124,6 +124,7 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 ### v0.4.4
 
 - 修复:未登录 GitHub 时不再自动弹登录页;点星也不再强制跳转登录
+- 修复:装插件直连 GitHub 失败时自动走国内镜像,没 VPN 也能装;pnpm 缺失时报错更清楚
 
 ### v0.4.3
 

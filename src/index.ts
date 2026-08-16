@@ -1745,12 +1745,20 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { return null }
   }
 
+  /** gh-proxy mirror URL for a `github:owner/repo` spec, preserving the `#path:` subdir. */
+  private mirrorSpecFor(spec: string): string | null {
+    const m = String(spec).match(/^github:([\w.-]+)\/([\w.-]+?)(#.*)?$/i)
+    if (!m) return null
+    return `https://gh-proxy.com/https://github.com/${m[1]}/${m[2]}.git${m[3] || ''}`
+  }
+
   private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[] }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
+    const mirrorSpec = this.mirrorSpecFor(spec)!
     const dir = await this.getProfileDir()
     const gate = await this.checkMarketConflict(o, repoName)
     if (gate) return { ok: false, packageName: null, message: gate }
@@ -1766,7 +1774,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       this.setTaskProgress(taskId, 12, '正在下载安装包…(已进行 0 秒)')
     }
     const startedAt = Date.now()
-    const pnpmResult = await this.pnpmShell('pnpm add ' + spec, dir, taskId ? (text) => {
+    const progress = taskId ? (text: string) => {
       // Surface pnpm's own progress line ("Progress: resolved X, downloaded Y…")
       const lines = String(text).split(/\r?\n/).filter(Boolean)
       let counts = ''
@@ -1777,10 +1785,20 @@ export class ZatMarketGateway extends TypertRemoteService {
       const secs = Math.floor((Date.now() - startedAt) / 1000)
       const pct = Math.min(82, 12 + secs * 2)
       this.setTaskProgress(taskId, pct, `正在下载安装包…(已进行 ${secs} 秒)${counts ? ' · ' + counts : ''}`)
-    } : undefined)
+    } : undefined
+    // 默认走官方 GitHub(开 VPN/代理的用户走官方渠道);已知直连不通时优先镜像;
+    // 安装时直连失败再自动补一次镜像重试,让没 VPN 的用户也能装。
+    let pnpmResult = await this.pnpmShell('pnpm add ' + (this.directDown ? mirrorSpec : spec), dir, progress)
+    if (pnpmResult.outcome.exitCode !== 0) {
+      const alt = await this.pnpmShell('pnpm add ' + (this.directDown ? spec : mirrorSpec), dir, progress)
+      if (alt.outcome.exitCode === 0) pnpmResult = alt
+    }
     if (pnpmResult.outcome.exitCode !== 0) {
       await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
+      if (/pnpm[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)|corepack[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(errText)) {
+        return { ok: false, packageName: null, message: '安装失败:本机没有可用的 pnpm。pnpm 是 dsh 插件系统的必备组件,请先安装 Node.js(自带 corepack,运行 corepack enable)或安装 pnpm 后重试。' }
+      }
       if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
         return {
           ok: false,
@@ -2130,15 +2148,21 @@ export class ZatMarketGateway extends TypertRemoteService {
       return { ok: true, hasUpdate: true, current: SELF_VERSION, latestVersion: remote, changes }
     }
     const spec = 'github:' + owner + '/' + repo
+    const mirrorSpec = this.mirrorSpecFor(spec) || spec
     const taskId = this.launchTask(async (id) => {
       this.setTaskStep(id, 'update', '正在下载市场新版本…')
       this.setTaskProgress(id, 8, '正在下载市场新版本…(网络慢时可能较久,请稍候)')
       const dir = await this.getProfileDir()
       const startedAt = Date.now()
-      const r = await this.pnpmShell('pnpm add ' + spec, dir, () => {
+      const progress = (): void => {
         const secs = Math.floor((Date.now() - startedAt) / 1000)
         this.setTaskProgress(id, Math.min(80, 8 + secs * 2), `正在下载市场新版本…(已进行 ${secs} 秒)`)
-      })
+      }
+      let r = await this.pnpmShell('pnpm add ' + (this.directDown ? mirrorSpec : spec), dir, progress)
+      if (r.outcome.exitCode !== 0) {
+        const alt = await this.pnpmShell('pnpm add ' + (this.directDown ? spec : mirrorSpec), dir, progress)
+        if (alt.outcome.exitCode === 0) r = alt
+      }
       if (r.outcome.exitCode !== 0) return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) }
       this.invalidateListCache()
       await this.saveLastKnownGood()
