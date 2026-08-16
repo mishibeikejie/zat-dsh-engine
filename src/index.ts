@@ -1565,6 +1565,13 @@ export class ZatMarketGateway extends TypertRemoteService {
       r = await this.ghApi('GET', path, token)
     }
     if (r.status !== 200) r = await this.ghGet(url)
+    // 匿名配额被限流(403/429)时,直连和 ghGet 都救不了(ghGet 会把 403 当"确定
+    // 答案"直接返回);但国内镜像走它自己的认证账号(5000/h),不受用户 IP 的
+    // 60/h 限制。这里在限流时补一次镜像,让没登录的用户也能无感继续搜。
+    if (r.status === 403 || r.status === 429) {
+      const mr = await this.httpGet(MIRROR + url)
+      if (mr.status === 200) r = mr
+    }
     if (r.status === 200) {
       if (this.searchCache.size > 300) {
         const first = this.searchCache.keys().next().value
