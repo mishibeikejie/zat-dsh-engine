@@ -65,6 +65,23 @@ function extractRegisteredNames(text: string, side: 'host' | 'client'): Set<stri
   return names
 }
 
+/** 从宿主/界面代码里提取"这个插件装完怎么用"的可读提示。 */
+function describeUsage(hostText: string, clientText: string): string[] {
+  const out: string[] = []
+  // 模型工具:defineTool({... name: 'xxx' ...})。
+  const tools = new Set<string>()
+  const toolRe = /defineTool\s*\(\s*\{[\s\S]{0,300}?name\s*:\s*['"]([^'"]{2,48})['"]/g
+  let m: RegExpExecArray | null
+  while ((m = toolRe.exec(String(hostText || ''))) !== null) tools.add(m[1]!)
+  if (tools.size > 0) out.push(`模型工具:${[...tools].slice(0, 6).join('、')} — 对话里直接说需求,模型会自动调用`)
+  // 界面/命令/设置槽位:register('xxx') 或 slots.register('xxx')。
+  const regs = extractRegisteredNames(String(clientText || ''), 'client')
+  const userFacing = [...regs].filter((r) => /command|settings|slot|conversation|sidebar|toolbar|menu|panel|\.tab/.test(r))
+  if (userFacing.length > 0) out.push(`界面/命令:${userFacing.slice(0, 6).join('、')} — 重启后到对应菜单或设置里找`)
+  if (out.length === 0) out.push('没检测到工具/界面注册,用法见简介(README)。')
+  return out
+}
+
 // ── minimal service faces (the real contracts come from the dsh services) ──
 
 interface CollectedStream {
@@ -1022,11 +1039,11 @@ export class ZatMarketGateway extends TypertRemoteService {
    * Pre-install conflict analysis against the candidate repo's manifest and
    * code. Hard problems block the install; soft problems become warnings.
    */
-  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[] }> {
+  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[]; usage: string[] }> {
     const block: string[] = []
     const warn: string[] = []
     const f = await this.fetchCandidateTexts(owner, repo, subdir)
-    if (!f) return { block, warn }
+    if (!f) return { block, warn, usage: [] }
     const meta = f.meta
     // (0) Declared entry files must exist in the repo — a plugin pointing at
     // uncommitted build artifacts (dist not committed) installs but can never
@@ -1101,7 +1118,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const sec of scanSecurity(f.clientText, '界面代码')) {
       warn.push(`安全提示:${sec.title}`)
     }
-    return { block, warn }
+    return { block, warn, usage: describeUsage(f.hostText, f.clientText) }
   }
 
   // ── find_plugin 装前体检 ────────────────────────────────────────────────
@@ -2161,6 +2178,9 @@ export class ZatMarketGateway extends TypertRemoteService {
           detailCpu = Array.isArray(pkgMeta.cpu) ? pkgMeta.cpu : []
         } catch { /* no manifest */ }
       }
+      let usage: string[] = []
+      const texts = await this.fetchCandidateTexts(o, r)
+      if (texts) usage = describeUsage(texts.hostText, texts.clientText)
       return {
         ok: true,
         readme,
@@ -2174,6 +2194,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && compareVersions(harnessRemote, harnessLocal) > 0),
         os: detailOs,
         cpu: detailCpu,
+        usage,
       }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -2404,7 +2425,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         this.setTaskStep(id, 'download', '正在下载安装包…(网络慢时可能较久,请稍候)')
         const res = await this.addSpec(o, r, s || undefined, id, analysis)
         return res.ok
-          ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+          ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, packageName: null, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
@@ -2435,7 +2456,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const res = await this.addSpec(o, r, s || undefined, id, analysis)
         const version = await this.remoteVersion(o, r, s || undefined)
         return res.ok
-          ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+          ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }

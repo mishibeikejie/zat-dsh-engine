@@ -86,7 +86,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/versions': () => Promise<RemoteResult<{ ok: boolean; map: Record<string, { local: string | null; remote: string | null; hasUpdate: boolean }> }>>
     'pluginMarket/translate': (items: Array<{ fullName: string; description: string }>) => Promise<RemoteResult<{ ok: boolean; map: Record<string, string>; llmUsable: boolean; pending: number }>>
     'pluginMarket/installed': () => Promise<RemoteResult<MarketJson>>
-    'pluginMarket/detail': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean }>>
+    'pluginMarket/detail': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean; usage?: string[] }>>
     'pluginMarket/selfupdate': (doUpdate: boolean) => Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
     'pluginMarket/subpackages': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
@@ -131,7 +131,7 @@ interface MarketRemote extends TypertClientRemote {
     versions(): Promise<RemoteResult<{ ok: boolean; map: Record<string, { local: string | null; remote: string | null; hasUpdate: boolean }> }>>
     translate(items: Array<{ fullName: string; description: string }>): Promise<RemoteResult<{ ok: boolean; map: Record<string, string>; llmUsable: boolean; pending: number }>>
     installed(): Promise<RemoteResult<MarketJson>>
-    detail(owner: string, repo: string): Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean }>>
+    detail(owner: string, repo: string): Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean; usage?: string[] }>>
     selfupdate(doUpdate: boolean): Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
     subpackages(owner: string, repo: string): Promise<RemoteResult<MarketJson & { kind?: string; packages?: MarketSubpackage[] }>>
     installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
@@ -1038,6 +1038,9 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             </div>
           )}
           {ddesc && <div className="zat-summary"><span className="zat-zhlabel">{t('简介:', 'About:')}</span>{ddesc}</div>}
+          {dd && Array.isArray(dd.usage) && dd.usage.length > 0 && (
+            <div className="zat-summary"><span className="zat-zhlabel">{t('怎么用:', 'How to use:')}</span>{dd.usage.join(';')}</div>
+          )}
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
           {!detail.noRepo && (dd
             ? <div className="zat-summary"><span className="zat-zhlabel">{t('README 摘要:', 'README:')}</span>{String(dd.summary || t('该仓库暂无 README 摘要', 'No README summary')).slice(0, 1200)}</div>
