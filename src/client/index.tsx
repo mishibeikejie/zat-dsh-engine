@@ -53,6 +53,8 @@ interface MarketItem {
   taskId?: string
   /** Installed from npm/link with no GitHub repo address (no update/star/detail). */
   noRepo?: boolean
+  /** Declared OS support (npm `os` field); undefined = not resolved yet. */
+  os?: string[]
 }
 
 interface MarketListResult {
@@ -94,6 +96,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     'pluginMarket/taskStatus': (taskId: string) => Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     'pluginMarket/installedList': () => Promise<RemoteResult<MarketListResult>>
+    'pluginMarket/osMap': (fullNames: string[]) => Promise<RemoteResult<MarketJson & { map?: Record<string, { os?: string[]; cpu?: string[] }> }>>
     'pluginMarket/listSessions': () => Promise<RemoteResult<MarketJson & { sessions?: SessionItem[] }>>
     'pluginMarket/deleteSession': (sessionId: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/star': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
@@ -137,6 +140,7 @@ interface MarketRemote extends TypertClientRemote {
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     taskStatus(taskId: string): Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     installedList(): Promise<RemoteResult<MarketListResult>>
+    osMap(fullNames: string[]): Promise<RemoteResult<MarketJson & { map?: Record<string, { os?: string[]; cpu?: string[] }> }>>
     listSessions(): Promise<RemoteResult<MarketJson & { sessions?: SessionItem[] }>>
     deleteSession(sessionId: string): Promise<RemoteResult<MarketJson>>
     star(owner: string, repo: string): Promise<RemoteResult<MarketJson & { starred?: boolean; needToken?: boolean; url?: string }>>
@@ -184,6 +188,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('healthCheck', []),
   desc('taskStatus', ['taskId']),
   desc('installedList', []),
+  desc('osMap', ['fullNames']),
   desc('listSessions', []),
   desc('deleteSession', ['sessionId']),
   desc('star', ['owner', 'repo']),
@@ -302,6 +307,7 @@ const css = `
 .zat-stime{font-size:11.5px;color:var(--color-fg3,#7c8698)}
 .zat-tag{font-size:10.5px;padding:1px 8px;border-radius:10px;background:var(--color-bg3,#232a3a);color:var(--color-fg2,#a8b2c4)}
 .zat-tag-live{background:rgba(52,211,153,.15);color:#34d399}
+.zat-osbadge{font-size:10.5px;padding:1px 8px;border-radius:10px;background:rgba(93,140,255,.14);color:#8ea6e8;border:1px solid rgba(93,140,255,.25);white-space:nowrap}
 .zat-pbar{height:8px;border-radius:6px;background:var(--color-bg3,#232a3a);overflow:hidden}
 .zat-pfill{height:100%;background:linear-gradient(90deg,#3d6bff,#7a4dff);border-radius:6px;transition:width .5s}
 .zat-ptext{font-size:11.5px;color:var(--color-fg2,#a8b2c4);margin-top:3px;line-height:1.5}
@@ -372,6 +378,14 @@ function formatStars(n: number): string {
   if (n >= 10000) return (n / 10000).toFixed(1) + 'w'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
   return String(n)
+}
+
+/** Map an npm `os` array to a short display string (Windows / macOS / Linux). */
+function osNames(os: string[]): string {
+  const name = (s: string): string => (s === 'win32' ? 'Windows' : s === 'darwin' ? 'macOS' : s === 'linux' ? 'Linux' : s)
+  const neg = os.filter((e) => e.startsWith('!')).map((e) => e.slice(1))
+  if (neg.length > 0) return '! ' + neg.map(name).join('/')
+  return os.map(name).join('/')
 }
 
 // ── panel ───────────────────────────────────────────────────────────────
@@ -535,6 +549,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setPage(p)
       requestZh(data.items)
       requestVersions(data.items)
+      requestOs(data.items)
     }).catch((err: unknown) => {
       loadingRef.current = false
       setLoading(false)
@@ -559,6 +574,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setInstalledMode(true)
       requestZh(data.items)
       requestVersions(data.items)
+      requestOs(data.items)
       // Resume watching any in-flight installs so their cards show progress
       // even after leaving the settings page and coming back.
       for (const it of data.items) {
@@ -597,6 +613,21 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           }
         }) : prev)
       }
+    }).catch(() => { /* best effort */ })
+  }
+
+  /** 批量解析卡片上的"支持系统"标签(新插件也会自动补齐)。 */
+  function requestOs(list: MarketItem[]): void {
+    const names = list.filter((it) => it.os === undefined && !it.noRepo).map((it) => it.fullName)
+    if (!names.length) return
+    void pm.osMap(names).then((res) => {
+      if (!res.ok || !res.value.ok || !res.value.map) return
+      const map = res.value.map
+      setItems((prev) => prev ? prev.map((it) => {
+        const hit = map[it.fullName.toLowerCase()]
+        if (hit && it.os === undefined) return { ...it, os: hit.os ?? [] }
+        return it
+      }) : prev)
     }).catch(() => { /* best effort */ })
   }
 
@@ -935,6 +966,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             : <img src={detail.cover} onError={(e) => { e.currentTarget.style.display = 'none' }} alt={detail.name} />}</div>
           <div className="zat-dtitle">{detail.name}</div>
           <div className="zat-downer">{detail.fullName}</div>
+          {detail.os !== undefined && (
+            <div className="zat-dstats">
+              <span className="zat-osbadge">{t('支持系统:', 'Supported:')} {detail.os.length === 0 ? t('跨平台', 'Cross-platform') : osNames(detail.os)}</span>
+            </div>
+          )}
           {detail.noRepo && (
             <div className="zat-subchoices">
               <div className="zat-subchoices-title">
@@ -1256,6 +1292,11 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
             </span>
           )}
           {item.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[item.language] || '#8b949e' }} /> {item.language}</span>}
+          {item.os !== undefined && (
+            <span className="zat-osbadge" title={t('支持的系统', 'Supported systems')}>
+              {item.os.length === 0 ? t('跨平台', 'Cross-platform') : osNames(item.os)}
+            </span>
+          )}
           {canDisable(item) && (
             <button
               className="zat-mini"

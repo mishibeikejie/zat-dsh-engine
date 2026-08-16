@@ -35,7 +35,7 @@ function Write-Log {
 
 function Get-Pnpm {
     $c = Get-Command pnpm -ErrorAction SilentlyContinue
-    if ($c) { return @{ Exe = 'pnpm'; Pre = $null } }
+    if ($c) { return @{ Exe = 'pnpm'; PreArgs = @() } }
     $cands = @(
         (Join-Path $env:APPDATA 'npm\pnpm.cmd'),
         (Join-Path $env:LOCALAPPDATA 'pnpm\pnpm.cmd'),
@@ -44,10 +44,26 @@ function Get-Pnpm {
     $node = Get-Command node -ErrorAction SilentlyContinue
     if ($node) { $cands += (Join-Path (Split-Path $node.Source) 'pnpm.cmd') }
     foreach ($p in $cands) {
-        if ($p -and (Test-Path $p)) { return @{ Exe = $p; Pre = $null } }
+        if ($p -and (Test-Path $p)) { return @{ Exe = $p; PreArgs = @() } }
     }
     $cc = Get-Command corepack -ErrorAction SilentlyContinue
-    if ($cc) { return @{ Exe = 'corepack'; Pre = 'pnpm' } }
+    if ($cc) { return @{ Exe = 'corepack'; PreArgs = @('pnpm') } }
+    # 兜底:读 start-dsh.cmd 里的 NODE_BIN / PNPM_MJS,用用户实际启动 DSH 的那套
+    $startCmd = Join-Path $script:DshDir 'start-dsh.cmd'
+    if (Test-Path $startCmd) {
+        $lines = Get-Content $startCmd -Encoding UTF8
+        $nodeBin = $null; $pnpmMjs = $null
+        foreach ($l in $lines) {
+            if ($l -match 'NODE_BIN=([^\r\n]+)') { $nodeBin = $Matches[1].Trim().Trim('"') }
+            if ($l -match 'PNPM_MJS=([^\r\n]+)') { $pnpmMjs = $Matches[1].Trim().Trim('"') }
+        }
+        if ($nodeBin -and $pnpmMjs) {
+            $nodeExe = Join-Path $nodeBin 'node.exe'
+            if ((Test-Path $nodeExe) -and (Test-Path $pnpmMjs)) {
+                return @{ Exe = $nodeExe; PreArgs = @($pnpmMjs) }
+            }
+        }
+    }
     return $null
 }
 
@@ -90,7 +106,8 @@ function Start-Dsh {
     $script:ErrPos = 0
     $script:Ready = $false
 
-    $cmdLine = if ($pnpm.Pre) { "$($pnpm.Exe) $($pnpm.Pre) dsh web" } else { "$($pnpm.Exe) dsh web" }
+    $parts = @($pnpm.Exe) + $pnpm.PreArgs + @('dsh', 'web')
+    $cmdLine = ($parts | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     Write-Log "正在启动 DSH ($cmdLine)…"
     try {
         $script:Proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $cmdLine) `
@@ -126,11 +143,10 @@ function Run-Dsh {
     $pnpm = Get-Pnpm
     if (-not $pnpm) { Write-Log '找不到 pnpm。'; return }
     if (-not (Test-Path $script:DshDir)) { Write-Log 'DSH 安装目录不存在。'; return }
-    $full = if ($pnpm.Pre) { @($pnpm.Pre, 'dsh') } else { @('dsh') }
-    $full += @('plugin', '--profile', $script:Profile) + $Args
+    $argsArr = $pnpm.PreArgs + @('dsh', 'plugin', '--profile', $script:Profile) + $Args
     Write-Log "执行: dsh plugin --profile $($script:Profile) $($Args -join ' ')"
     $form.Refresh()
-    $out = & $pnpm.Exe @full 2>&1
+    $out = & $pnpm.Exe @argsArr 2>&1
     foreach ($l in $out) { Write-Log ([string]$l).TrimEnd() }
     Write-Log '命令执行完毕'
 }
@@ -140,7 +156,8 @@ function Test-Env {
     $node = Get-Command node -ErrorAction SilentlyContinue
     Write-Log "node: $($(if($node){$node.Source + ' (v' + (& node -v) + ')'}else{'未找到'}))"
     $pnpm = Get-Pnpm
-    Write-Log "pnpm: $($(if($pnpm){$pnpm.Exe + ' ' + $pnpm.Pre}else{'未找到'}))"
+    $pnpmDesc = if ($pnpm) { ($pnpm.Exe + ' ' + ($pnpm.PreArgs -join ' ')).Trim() } else { '未找到' }
+    Write-Log "pnpm: $pnpmDesc"
     Write-Log "DSH 目录: $($(if(Test-Path $script:DshDir){'存在 ' + $script:DshDir}else{'不存在 ' + $script:DshDir}))"
     Write-Log "profile: $($script:Profile)"
     Write-Log "端口 $($script:Port): $($(if(Test-DshRunning){'已监听(DSH 在运行)'}else{'未监听(未运行)'}))"

@@ -248,6 +248,19 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
+/**
+ * npm `os`/`cpu` field semantics: entries starting with `!` form a blocklist
+ * (support everything except these), otherwise the array is an allowlist.
+ * An empty/absent field means "no restriction".
+ */
+export function fieldSupports(field: readonly string[] | undefined, current: string): boolean {
+  if (!field || field.length === 0) return true
+  const negated = field.filter((e) => e.startsWith('!')).map((e) => e.slice(1))
+  const allowed = field.filter((e) => !e.startsWith('!'))
+  if (negated.length > 0) return !negated.includes(current)
+  return allowed.includes(current)
+}
+
 /** Subdirectory spec: nested path segments, no traversal, no shell chars. */
 function safeSubdir(value: string): string | null {
   const v = String(value || '').trim().replace(/^\/+/, '')
@@ -396,6 +409,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   private readonly healthCache = new Map<string, { at: number; data: HealthResult }>()
   /** GitHub 搜索结果缓存(10 分钟),模型连发相近查询时不烧匿名配额。 */
   private readonly searchCache = new Map<string, { at: number; body: string }>()
+  /** 每个仓库声明的 os/cpu 支持范围缓存(30 分钟),给卡片打"支持系统"标签。 */
+  private readonly osCache = new Map<string, { at: number; os: string[]; cpu: string[] }>()
   private kindScanStarted = false
 
   constructor(ctx: Context) {
@@ -872,11 +887,11 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /** Fetch a candidate repo's manifest and code files (network, mirror-backed). */
-  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; missingEntries: string[]; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } } | null> {
+  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; missingEntries: string[]; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } } } | null> {
     const base = subdir ? `${subdir}/` : ''
     const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
     if (pkgRes.status !== 200) return null
-    let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
+    let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } } = {}
     try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return null }
     const declared: string[] = []
     if (typeof meta.main === 'string' && meta.main) declared.push(meta.main)
@@ -1013,6 +1028,14 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const d of Object.keys(meta.dependencies || {})) {
       if (d.startsWith('@deepseek-ai/')) block.push(`官方包${d}应为peer依赖`)
     }
+    // (1b) System/CPU compatibility: a plugin that declares it does not support
+    // this OS/arch would break dsh on the next restart — block up front.
+    if (!fieldSupports(meta.os, process.platform)) {
+      block.push(`不支持当前系统:该插件仅支持 ${(meta.os || []).join('、')},你当前是 ${process.platform},装了 dsh 大概率起不来`)
+    }
+    if (!fieldSupports(meta.cpu, process.arch)) {
+      block.push(`不支持当前 CPU:该插件仅支持 ${(meta.cpu || []).join('、')},你当前是 ${process.arch}`)
+    }
     // (2) Loader row id collisions with installed bundles.
     const candIds = extractPatchIds(f.hostText)
     const installedIds = await this.installedPatchIds()
@@ -1125,6 +1148,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         peerDependencies?: Record<string, string>
         peerDependenciesMeta?: Record<string, { optional?: boolean }>
         scripts?: Record<string, string>
+        os?: string[]
+        cpu?: string[]
         dsh?: { bundle?: { patch?: string } }
       }
       let meta: CandidateMeta
@@ -1194,6 +1219,13 @@ export class ZatMarketGateway extends TypertRemoteService {
       const officialDeps = Object.keys(meta.dependencies || {}).filter((d) => d.startsWith('@deepseek-ai/'))
       if (officialDeps.length > 0) {
         checks.push({ level: 'error', title: `官方包写进了 dependencies(共 ${officialDeps.length} 个)`, detail: `必须用 peerDependencies 引用:${officialDeps.join('、')}。写成直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。` })
+      }
+      // 系统/CPU 兼容性:插件用 npm 的 os/cpu 字段声明支持范围,不支持本机就直接标硬伤。
+      if (!fieldSupports(meta.os, process.platform)) {
+        checks.push({ level: 'error', title: `不支持当前系统:仅支持 ${(meta.os || []).join('、')}`, detail: `这个插件声明了操作系统限制(你当前是 ${process.platform}),装上去大概率起不来或直接报错。` })
+      }
+      if (!fieldSupports(meta.cpu, process.arch)) {
+        checks.push({ level: 'error', title: `不支持当前 CPU:仅支持 ${(meta.cpu || []).join('、')}`, detail: `这个插件声明了 CPU 架构限制(你当前是 ${process.arch}),装上去大概率起不来。` })
       }
       const peers = meta.peerDependencies || {}
       for (const pd of Object.keys(peers)) {
@@ -2084,6 +2116,15 @@ export class ZatMarketGateway extends TypertRemoteService {
       const isHarness = HARNESS_REPOS.includes((o + '/' + r).toLowerCase())
       const harnessLocal = isHarness ? this.harnessVersion() : null
       const harnessRemote = isHarness ? await this.remoteVersion(o, r) : null
+      let detailOs: string[] = []
+      let detailCpu: string[] = []
+      if (rootPkg.status === 200) {
+        try {
+          const pkgMeta = JSON.parse(rootPkg.body) as { os?: string[]; cpu?: string[] }
+          detailOs = Array.isArray(pkgMeta.os) ? pkgMeta.os : []
+          detailCpu = Array.isArray(pkgMeta.cpu) ? pkgMeta.cpu : []
+        } catch { /* no manifest */ }
+      }
       return {
         ok: true,
         readme,
@@ -2095,10 +2136,54 @@ export class ZatMarketGateway extends TypertRemoteService {
         harnessVersion: harnessLocal,
         harnessRemote,
         harnessHasUpdate: isHarness && !!(harnessLocal && harnessRemote && compareVersions(harnessRemote, harnessLocal) > 0),
+        os: detailOs,
+        cpu: detailCpu,
       }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
+  }
+
+  /** Read one repo's declared os/cpu support (cached 30 min; [] = cross-platform). */
+  private async fetchOs(owner: string, repo: string): Promise<{ os: string[]; cpu: string[] } | null> {
+    const key = (owner + '/' + repo).toLowerCase()
+    const hit = this.osCache.get(key)
+    if (hit && Date.now() - hit.at < 30 * 60 * 1000) return { os: hit.os, cpu: hit.cpu }
+    const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/package.json`)
+    if (r.status !== 200) return null
+    try {
+      const meta = JSON.parse(r.body) as { os?: string[]; cpu?: string[] }
+      const os = Array.isArray(meta.os) ? meta.os : []
+      const cpu = Array.isArray(meta.cpu) ? meta.cpu : []
+      this.osCache.set(key, { at: Date.now(), os, cpu })
+      return { os, cpu }
+    } catch { return null }
+  }
+
+  /** Batch: resolve declared os/cpu for a list of repos (for card labels). */
+  @Remote('osMap')
+  async osMap(fullNames: string[]): Promise<JsonObject> {
+    const map: Record<string, { os: string[]; cpu: string[] }> = {}
+    const list = Array.isArray(fullNames) ? fullNames.slice(0, 100) : []
+    const jobs = list.map((full) => async () => {
+      const seg = String(full).split('/')
+      const owner = safeSegment(seg[0] || '')
+      const repo = safeSegment(seg.slice(1).join('/'))
+      if (!owner || !repo) return
+      const res = await this.fetchOs(owner, repo)
+      if (res) map[String(full).toLowerCase()] = res
+    })
+    let next = 0
+    const worker = async (): Promise<void> => {
+      while (next < jobs.length) {
+        const j = jobs[next++]!
+        await j()
+      }
+    }
+    const workers: Promise<void>[] = []
+    for (let w = 0; w < 6; w++) workers.push(worker())
+    await Promise.all(workers)
+    return { ok: true, map }
   }
 
   /** True when this market is installed from a local path (link:/file:/workspace:) — a dev checkout. */

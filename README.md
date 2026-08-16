@@ -126,6 +126,7 @@ Each of these is the minimal permission set required for the market to work; if 
 - New: the Sessions page is now two columns — the right "Archived" column lists archived sessions separately, deletable directly
 - Fix: plugins installed from npm/locally (no repo address) now appear in "Installed" and can be uninstalled/toggled
 - Fix: installing a plugin whose entry files are missing (uncommitted build artifacts) is now blocked up front instead of failing in pnpm
+- New: cards show "supported systems" (Windows/macOS/Linux), auto-detected for new plugins; plugins that don't support the current OS are blocked in the health check and install gate
 
 ### v0.4.3
 

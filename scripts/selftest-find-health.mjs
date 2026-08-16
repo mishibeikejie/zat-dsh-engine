@@ -85,7 +85,7 @@ const fakeCtx = {
   baseUrl: join(home, 'profiles', 'web'),
 }
 
-const { ZatMarketGateway, scanSecurity, compareVersions } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
+const { ZatMarketGateway, scanSecurity, compareVersions, fieldSupports } = await import(pathToFileURL(join(selftestDir, 'lib', 'index.js')).href)
 const gw = new ZatMarketGateway(fakeCtx)
 if (!toolDef) throw new Error('tools.register 没有被调用 —— find_plugin 工具注册失败')
 
@@ -167,6 +167,18 @@ assert(compareVersions('v1.2.3', '1.2.3') === 0, 'compareVersions: v 前缀不�
 assert(compareVersions('1.10.0', '1.9.9') === 1, 'compareVersions: 按数字比,不是按字符串比')
 assert(gw.mirrorSpecFor('github:a/b') === 'https://gh-proxy.com/https://github.com/a/b.git', 'mirrorSpecFor: 基本转换')
 assert(gw.mirrorSpecFor('github:a/b#path:c/d') === 'https://gh-proxy.com/https://github.com/a/b.git#path:c/d', 'mirrorSpecFor: 保留子目录')
+
+console.log('\n== 系统兼容检查(fieldSupports + osMap)==')
+assert(fieldSupports(['win32', 'darwin'], 'win32') === true, 'fieldSupports: 白名单命中')
+assert(fieldSupports(['linux', 'darwin'], 'win32') === false, 'fieldSupports: 白名单不支持 win32')
+assert(fieldSupports(['!win32'], 'linux') === true, 'fieldSupports: 黑名单放行 linux')
+assert(fieldSupports(['!win32'], 'win32') === false, 'fieldSupports: 黑名单拦截 win32')
+assert(fieldSupports(undefined, 'win32') === true, 'fieldSupports: 未声明=跨平台')
+assert(fieldSupports([], 'win32') === true, 'fieldSupports: 空数组=跨平台')
+const osm = await gw.osMap(['mishibeikejie/zat-dsh-engine'])
+const osmEntry = osm.map && osm.map['mishibeikejie/zat-dsh-engine']
+console.log(`  osMap: ${osmEntry ? `os=[${osmEntry.os}] cpu=[${osmEntry.cpu}]` : '(无)'}`)
+assert(osm.ok === true && osmEntry && Array.isArray(osmEntry.os), 'osMap 返回本仓库的 os/cpu')
 const su = await gw.selfupdate(false)
 console.log(`  selfupdate(false): hasUpdate=${su.hasUpdate} devLink=${su.devLink} message=${su.message}`)
 assert(su.hasUpdate === false, 'link 安装下不提示更新(本地 0.4.3 领先 GitHub 0.4.2,不提示降级)')
