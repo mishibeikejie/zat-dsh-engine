@@ -6,7 +6,7 @@
 #  - 插件安装(走国内镜像) / 卸载 / 列表
 #  - 纯 PowerShell + WinForms,无需任何额外依赖
 # =====================================================================
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
