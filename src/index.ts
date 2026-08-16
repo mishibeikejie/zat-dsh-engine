@@ -1092,15 +1092,14 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
     } catch { /* best effort */ }
-    // (6) Security scan: error-level patterns (obfuscation, credential theft,
-    // data-exfil endpoints) block the install; warn-level stays as warnings.
+    // (6) 安全扫描是启发式检测,会误伤正经插件(比如"发通知到 Discord/Telegram"
+    // 的插件就会命中 webhook/机器人钩子)。所以只提示、不拦截:用户装前能看见,
+    // 装不装自己定。真正的硬拦截交给上面的客观项(官方包写错/入口缺失/系统不支持)。
     for (const sec of scanSecurity(f.hostText, '宿主代码')) {
-      if (sec.level === 'error') block.push(`安全:${sec.title}`)
-      else warn.push(sec.title)
+      warn.push(`安全提示:${sec.title}`)
     }
     for (const sec of scanSecurity(f.clientText, '界面代码')) {
-      if (sec.level === 'error') block.push(`安全:${sec.title}`)
-      else warn.push(sec.title)
+      warn.push(`安全提示:${sec.title}`)
     }
     return { block, warn }
   }
@@ -1302,9 +1301,9 @@ export class ZatMarketGateway extends TypertRemoteService {
           checks.push({ level: 'warn', title: `依赖用户目录配置文件:${[...cfgs].slice(0, 3).join('、')}`, detail: '插件要读用户目录下的配置文件;全新安装时这个文件不存在,功能可能直接失效,需要先按 README 生成配置。' })
         }
       }
-      // 安全扫描:宿主代码 + 界面代码,error 级是危险模式,warn 级是透明度提示。
-      for (const f of scanSecurity(hostText, '宿主代码')) checks.push(f)
-      for (const f of scanSecurity(clientText, '界面代码')) checks.push(f)
+      // 安全扫描:启发式检测,只作为"提示"(warn)报给用户,不标 ❌ 硬伤,避免误杀正经插件。
+      for (const f of scanSecurity(hostText, '宿主代码')) checks.push(f.level === 'error' ? { level: 'warn', title: f.title, detail: f.detail } : f)
+      for (const f of scanSecurity(clientText, '界面代码')) checks.push(f.level === 'error' ? { level: 'warn', title: f.title, detail: f.detail } : f)
       if (repoMeta) {
         if (repoMeta.disabled) checks.push({ level: 'error', title: '仓库已被 GitHub 停用', detail: 'git 安装会直接失败,不要推荐。' })
         if (repoMeta.archived) checks.push({ level: 'error', title: '仓库已归档(archived)', detail: '作者标记不再维护,出了问题不会修。' })
