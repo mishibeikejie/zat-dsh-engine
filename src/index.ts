@@ -184,11 +184,18 @@ const CATEGORY_QUERY: Record<string, string> = {
 function encodeQueryPart(s: string): string {
   // Full percent-encoding keeps every character the user types (Chinese,
   // %, &, #, +, …) inside the query value instead of breaking the URL or
-  // being parsed as a GitHub query operator. Quotes, backslashes and
-  // parentheses are query operators with no useful literal meaning in a
-  // market search, so they degrade to spaces; otherwise GitHub answers
-  // "Validation Failed" 400 / "Unprocessable Entity" 422.
-  return encodeURIComponent(String(s).replace(/["\\()]/g, ' ')).replace(/%20/g, '+')
+  // being parsed as a GitHub query operator. Then neutralize the tokens that
+  // make GitHub's search API answer 400/422:
+  //  - quotes/backslashes/parentheses → spaces;
+  //  - `:` → space, so a qualifier-looking word like `repo:foo` becomes plain text;
+  //  - bare OR/AND/NOT (word-boundary, case-insensitive) → space, so a lone
+  //    "OR" can't become a trailing boolean operator.
+  return encodeURIComponent(
+    String(s)
+      .replace(/["\\()]/g, ' ')
+      .replace(/:/g, ' ')
+      .replace(/\b(?:OR|AND|NOT)\b/gi, ' '),
+  ).replace(/%20/g, '+')
 }
 
 /** Reject anything that is not a plain GitHub owner/repo segment. */
@@ -309,7 +316,7 @@ const COMMON_BINS = new Set(['node', 'npm', 'pnpm', 'yarn', 'npx', 'git', 'cmd',
 
 /** 知名服务的域名:出现了不报警,只属于"正常业务去向"。 */
 const ALLOWED_HOSTS = new Set([
-  'github.com', 'api.github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com', 'githubusercontent.com', 'gh-proxy.com', 'gitee.com',
+  'github.com', 'api.github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com', 'githubusercontent.com', 'gh-proxy.com', 'ghfast.top', 'gitee.com',
   'deepseek.com', 'api.deepseek.com', 'platform.deepseek.com', 'chat.deepseek.com', 'status.deepseek.com',
   'openai.com', 'api.openai.com', 'anthropic.com', 'api.anthropic.com', 'claude.ai',
   'openrouter.ai', 'groq.com', 'api.groq.com', 'mistral.ai', 'api.mistral.ai', 'googleapis.com', 'generativelanguage.googleapis.com',
@@ -522,7 +529,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=${limit}&page=1`
         const r = await this.ghSearch(url)
         if (r.status !== 200) {
-          return { items: [], notice: `搜索失败(${r.status})${r.error ? ':' + r.error.slice(0, 120) : ''}。稍后再试,或换个说法。` }
+          const why = r.status === 403 || r.status === 429 ? '搜索太频繁被限流,稍后再试。' : r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'
+          return { items: [], notice: `搜索失败(${r.status})。${why}` }
         }
         let raw: unknown[] = []
         try { raw = (JSON.parse(r.body) as { items?: unknown[] }).items ?? [] } catch { /* keep empty */ }
@@ -1948,7 +1956,10 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (qText) query += '+' + encodeQueryPart(qText)
       const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
       const r = await this.ghSearch(url)
-      if (r.status !== 200) return { ok: false, message: `搜索失败(${r.status})。${r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'}` }
+      if (r.status !== 200) {
+        const why = r.status === 403 || r.status === 429 ? '搜索太频繁被限流,稍后再试。' : r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'
+        return { ok: false, message: `搜索失败(${r.status})。${why}` }
+      }
       let json: { items?: unknown[]; total_count?: number } | null = null
       try {
         json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
