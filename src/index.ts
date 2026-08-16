@@ -2985,10 +2985,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (!s.enabled || s.name.startsWith('@deepseek-ai/')) continue
         const texts = await this.readLocalTexts(s.name)
         for (const f of scanSecurity(texts.hostText, `${s.name} 宿主代码`)) {
-          issues.push({ level: f.level, title: f.title, detail: f.detail })
+          issues.push({ level: f.level, title: f.title, detail: f.level === 'error' ? '解决:点「一键修复」自动停用这个插件。' : f.detail, fixable: f.level === 'error' })
         }
         for (const f of scanSecurity(texts.clientText, `${s.name} 界面代码`)) {
-          issues.push({ level: f.level, title: f.title, detail: f.detail })
+          issues.push({ level: f.level, title: f.title, detail: f.level === 'error' ? '解决:点「一键修复」自动停用这个插件。' : f.detail, fixable: f.level === 'error' })
         }
       }
       // Multiple market/manager plugins.
@@ -3077,6 +3077,31 @@ export class ZatMarketGateway extends TypertRemoteService {
           fixed.push('已补装缺失依赖' + (missingPeers.size ? `:${[...missingPeers].join('、')}` : ''))
         } else {
           remaining.push(`依赖补装失败(网络或 pnpm 问题):${[...missingPeers].join('、') || '缺包文件'}。开代理后再点一次,或手动 dsh plugin add。`)
+        }
+      }
+      // 3) 有安全风险(混淆/偷凭据/可疑外发)的已启用插件 → 停用,可逆。
+      const secDisable: string[] = []
+      for (const name of deps) {
+        if (name.startsWith('@deepseek-ai/') || !bundles.includes(name)) continue
+        const texts = await this.readLocalTexts(name)
+        const findings = [...scanSecurity(texts.hostText, name), ...scanSecurity(texts.clientText, name)]
+        if (findings.some((f) => f.level === 'error')) secDisable.push(name)
+      }
+      if (secDisable.length > 0) {
+        const snap = await this.snapshotProfile(dir)
+        const newBundles = bundles.filter((b) => !secDisable.includes(b))
+        p.dsh = p.dsh || {}
+        ;(p.dsh as JsonObject).profile = (p.dsh as JsonObject).profile || {}
+        ;((p.dsh as JsonObject).profile as JsonObject).bundles = newBundles
+        await this.writeProfile(p)
+        try {
+          const check = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
+          const checkBundles = ((check.dsh as JsonObject | undefined)?.profile as JsonObject | undefined)?.bundles
+          if (!Array.isArray(checkBundles) || secDisable.some((n) => checkBundles.includes(n))) throw new Error('bundles not persisted')
+          fixed.push(`已停用有安全风险的插件 ${secDisable.join('、')}(可再启用)`)
+        } catch {
+          await this.restoreProfile(dir, snap)
+          remaining.push('停用安全风险插件失败,已还原;请手动停用。')
         }
       }
       this.invalidateListCache()
