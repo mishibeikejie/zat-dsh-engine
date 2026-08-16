@@ -34,6 +34,9 @@ const HOST_EXTERNALS = [
   '@deepseek-ai/dsh-fs',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-tools',
+  // Reads/writes the profile's cordis.patch.yml with the same `!!js` dialect
+  // the harness uses; resolved from node_modules (a declared dependency).
+  'js-yaml',
 ] as const
 
 export default defineConfig([

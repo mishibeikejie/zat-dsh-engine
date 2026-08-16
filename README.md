@@ -120,6 +120,14 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.0
+
+- **Fix install failures**: network requests now try the mirror first with 2–4s per-path timeouts, so a dropped/timing-out proxy no longer stalls installs; skill packs can now be installed in one click into `~/.dsh/skills`; file-in-use/permission errors are no longer misreported as network issues
+- "Installed" is now served locally and instantly (7ms), unaffected by network/proxy outages; an installed plugin no longer shows an "Install" button in the "All" list (state stays in sync)
+- Opening a card detail and going back keeps the list at its previous scroll position
+- Detail README now shows a failure notice within 10s instead of spinning forever
+- Skills show the correct star count after install
+
 ### v0.5.0
 
 - One-click check + repair: real detection (network/pnpm/entry files/OS support/past errors), auto-fixes what it can (installs pnpm, enables plugins, fills missing deps), and explains the rest clearly

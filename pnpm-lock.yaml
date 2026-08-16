@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@deepseek-ai/dsh-client-ui-aqua':
+        specifier: github:WYH66666666/DSH-Transparent-UI-Plugin
+        version: https://codeload.github.com/WYH66666666/DSH-Transparent-UI-Plugin/tar.gz/588a011d98d2cf20ade5f8409484fbe08efa7858(react@18.3.1)
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.3.1
       zod:
         specifier: ^4.0.0
         version: 4.4.3
@@ -35,6 +41,21 @@ packages:
 
   '@deepseek-ai/cosmokit@1.8.2':
     resolution: {integrity: sha512-muBOKtSrUKU5m/xpq8ZXWL6hQ/jgd4PhU2PqH97bcxIiLEJfNwZOGQEx4t/aS/GgxRAR+ra9pMHPMtTHU4sqqA==}
+
+  '@deepseek-ai/dsh-client-ui-aqua@https://codeload.github.com/WYH66666666/DSH-Transparent-UI-Plugin/tar.gz/588a011d98d2cf20ade5f8409484fbe08efa7858':
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/WYH66666666/DSH-Transparent-UI-Plugin/tar.gz/588a011d98d2cf20ade5f8409484fbe08efa7858}
+    version: 1.1.2
+    peerDependencies:
+      '@deepseek-ai/cordis': ^4.0.1
+      '@deepseek-ai/dsh-client-locale': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-runtime': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-ui-primitives': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-ui-settings': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-ui-settings-plugins': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-ui-slots': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-client-ui-theme': ^0.1.0-rc.5
+      '@deepseek-ai/dsh-invariants': ^0.1.0-rc.5
+      react: ^18.2.0
 
   '@deepseek-ai/dsh-tools@0.1.0-rc.6':
     resolution: {integrity: sha512-Tu08EPK3JyK0iNjH4FGzu/1uADynNSS6SmwOLdfytUN0YNqwNuKFSt2OJUg19famNlTgy992DcHfDu0T+gLXFg==}
@@ -302,6 +323,9 @@ packages:
     resolution: {integrity: sha512-BJ8/l4R5LRE7hW9WdSuGYrLSHi2ynxeFpDFbH0K/CgNeY/tyhk+vO6TYxXC5r5CpUhNVX310xzPsN/H9lCdfOA==}
     engines: {node: '>=14'}
 
+  argparse@2.0.1:
+    resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
+
   cac@7.0.0:
     resolution: {integrity: sha512-tixWYgm5ZoOD+3g6UTea91eow5z6AAHaho3g0V9CNSNb45gM8SmflpAc+GRd1InC4AqN/07Unrgp56Y94N9hJQ==}
     engines: {node: '>=20.19.0'}
@@ -347,6 +371,10 @@ packages:
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
+
+  js-yaml@4.3.1:
+    resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
+    hasBin: true
 
   loose-envify@1.4.0:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
@@ -470,6 +498,10 @@ packages:
 snapshots:
 
   '@deepseek-ai/cosmokit@1.8.2': {}
+
+  '@deepseek-ai/dsh-client-ui-aqua@https://codeload.github.com/WYH66666666/DSH-Transparent-UI-Plugin/tar.gz/588a011d98d2cf20ade5f8409484fbe08efa7858(react@18.3.1)':
+    dependencies:
+      react: 18.3.1
 
   '@deepseek-ai/dsh-tools@0.1.0-rc.6':
     dependencies:
@@ -619,6 +651,8 @@ snapshots:
 
   ansis@4.3.1: {}
 
+  argparse@2.0.1: {}
+
   cac@7.0.0: {}
 
   csstype@3.2.3: {}
@@ -642,6 +676,10 @@ snapshots:
   import-without-cache@0.4.0: {}
 
   js-tokens@4.0.0: {}
+
+  js-yaml@4.3.1:
+    dependencies:
+      argparse: 2.0.1
 
   loose-envify@1.4.0:
     dependencies:

@@ -1,0 +1,1239 @@
+[
+  {
+    "cat": "皮肤/主题",
+    "repo": "HeiGeAi/deepseek-harness-skin",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "147228/dsh-xiaoyao-skins",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "LAN-TINA-WS/dsh-gui-customization",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "suzike/freestyle-dsh-theme",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "KinGao294/dsh-skin",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "RevolutionLA/dsh-dream-skin",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "NoNameLeGo/dsh-catppuccin",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "orxz/deepseek-harness-themes",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "LaplaceYoung/dsh-qq2006",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "ZSeven-W/openpencil",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "nevertoday/dsh-theme-plugin",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "dancingmemory/dskin",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "WYH66666666/DSH-Transparent-UI-Plugin",
+    "form": "client-only",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "xiaobright/dsh-anchored-standard",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "Anionex/agent-vision-toolkit",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "starslittle/dsh-blue-whale",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "0xsline/awesome-deepseek-harness",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "xyTom/coding-tools-mcp",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "zhijun-dai/Catppuccin-dsh-theme",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "TQSY114514/dsh-ui-appearance",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "Zhiyuan-Fan/Awesome-DeepSeek-Harness-Plugins",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "sandbaseai/sandbase-harness",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [
+      "./dist/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "lssyd20070106/dsh-ui-preset-enhance",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "DViridescent/dafy-whale-theme",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "superdesigndev/treg",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "皮肤/主题",
+    "repo": "Tommy00748/dsh-theme-cyberpunk2077",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "Alex-Yanggg/awesome-DSH-plugin",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "Chinesezjc/dsh-interconnect",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "YaoApp/yao",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "ysr666/dsh-vision-router",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "Anionex/dsh-vision-toolkit",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "THEWOLFWALKER/dsh-notifier",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "HuanLinOTO/dsh-plugin-mineru",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "Lum1104/dsh-browser",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/dsh"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "anysearch-team/anysearch-dsh",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "hanelalo/browser-bridge",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "ZSeven-W/dsh-noema",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "AwesomeHou/dsh-plugin-marketplace",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "mishibeikejie/zat-dsh-engine",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "Sanqi-normal/dsh-webui-market-plugin",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "工具/终端",
+    "repo": "omdsh-dev/dsh-custom-tool",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "bradeGithub/DSH-Plugins-Marketplace",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "Fisfzy/ego-browser",
+    "form": "client-only",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "omdsh-dev/dsh-genui",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "Ruler4396/dsh-launcher",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "YunTaiHua/illusion-agent",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "dsh-market/dsh-market",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "isomoes/ikanban",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "HsiangNianian/dsh-auto-continue",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "titanwings/colleague-skill",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "ZSeven-W/openpencil",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "yyyyukari/dsh-plugin-workshop",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Anionex/agent-vision-toolkit",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "tt-a1i/archify",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "foryourhealth111-pixel/Vibe-Skills",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "titanwings/dsh-better-browser",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "freestylefly/awesome-gpt-image-2",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "Clizo1209/dsh-playwright-browser",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "yogsoth-ai/de-anthropocentric-research-engine",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "volcengine/OpenViking",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "zhaoolee/notes",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Zhiyuan-Fan/Awesome-DeepSeek-Harness-Plugins",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Vladimir-Human/humanizer-ru",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "ZRui-C/dsh-computer-use",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "./dist/host.js",
+      "./dist/tool.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Nagi-ovo/dsh-find-plugins",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "浏览器/自动化",
+    "repo": "KinGao294/dsh-skin",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Dominic789654/awesome-deepseek-harness",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "superdesigndev/superdesign-skill",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "Minara-AI/minara-skills",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "Anionex/agent-vision-toolkit",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "Lum1104/dsh-browser",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/dsh"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "liustack/modlens",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "linhay/harmony-next.skills",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "Yts1919/dsh-vision-complete",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "Anionex/dsh-vision-toolkit",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "omdsh-dev/dsh-genui",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "技能",
+    "repo": "PM-Shawn/Abu-Cowork",
+    "form": "纯库",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "ysr666/dsh-vision-router",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "wangyang10/image-vision",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "william-jin-cmu/dsh-vision",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "linenxi-ctrl/dsh-vision",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "jyh20030112/dsh-visual-plugin",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "Flyvhidbwo/dsh-vision-proxy",
+    "form": "bundle",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "loudMore/dsh-drop-to-path",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "xlight/deepseek-visionary",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "oil-oil/dsh-vision",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "nexu-io/open-design",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "volcengine/OpenViking",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "tt-a1i/archify",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "ZSeven-W/openpencil",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "YaoApp/yao",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "Q00/ouroboros",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "liustack/modlens",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "whiteguo233/OpenBiliClaw",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "GCWing/BitFun",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "BlockRunAI/dsh-clawrouter",
+    "form": "bundle",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [
+      "lib/index.js",
+      "./lib/index.js"
+    ],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "Anionex/agent-vision-toolkit",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "strukto-ai/mirage",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "agentrq/agentrq",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "Devin-AXIS/iPolloWork",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "xyTom/coding-tools-mcp",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "nexu-io/open-design",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "paean-ai/deeptide",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "kbpoyo/dsh-image-bridge",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "anywhere-labs/deepseek-harness-desktop",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "agentrq/agentrq",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "YaoApp/yao",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "edison7009/EchoBird",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "vostride/agent-qa",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "GCWing/BitFun",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "GanyuanRan/Aegis",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "多智能体",
+    "repo": "freestylefly/wesight",
+    "form": "纯库",
+    "build": [
+      "prepare",
+      "postinstall"
+    ],
+    "entryMissing": [
+      "dist-electron/main.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "freestylefly/wesight",
+    "form": "纯库",
+    "build": [
+      "prepare",
+      "postinstall"
+    ],
+    "entryMissing": [
+      "dist-electron/main.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "humblebanana/open-record-replay",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "PM-Shawn/Abu-Cowork",
+    "form": "纯库",
+    "build": [
+      "prepare"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "PC2005-cloud/dsh-pet",
+    "form": "无package.json",
+    "build": false,
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "121103qwq/dsh-vision-sidecar",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "xiincs/deepseek-harness-desktop",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "vibeinging/deepseek-harness-desktop-app",
+    "form": "纯库",
+    "build": [
+      "postinstall"
+    ],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "ningbainb/deepseek-harness-desktop",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "ChisaAlter/Deepseek-Harness-Desktop",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "hust-open-atom-club/oh-dsh",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [
+      "dist/main.js",
+      "./dist/plugin.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "h4dex/opc-nexus",
+    "form": "纯库",
+    "build": [],
+    "entryMissing": [
+      "out/main/index.js"
+    ],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "视觉/多媒体",
+    "repo": "poiuyjie/dsh-vision-opencode",
+    "form": "client-only",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "omdsh-dev/dsh-notification",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [],
+    "peerOk": true
+  },
+  {
+    "cat": "硬件/桌面",
+    "repo": "QCYTSN/dsh-dafeiyu",
+    "form": "bundle",
+    "build": [],
+    "entryMissing": [],
+    "officialDep": [
+      "@deepseek-ai/schemastery"
+    ],
+    "peerOk": true
+  }
+]

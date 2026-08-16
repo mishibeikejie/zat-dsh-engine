@@ -97,3 +97,22 @@ declare module '*.json' {
   const value: unknown
   export default value
 }
+
+declare module 'js-yaml' {
+  export interface TypeOptions {
+    kind: string
+    resolve?: (data: unknown) => boolean
+    construct?: (data: unknown) => unknown
+    predicate?: (data: unknown) => boolean
+    represent?: (data: unknown) => unknown
+  }
+  export class Type {
+    constructor(tag: string, options: TypeOptions)
+  }
+  export class Schema {
+    extend(...types: Type[]): Schema
+  }
+  export const JSON_SCHEMA: Schema
+  export function load<T = unknown>(input: string, options?: { schema?: Schema }): T
+  export function dump(value: unknown, options?: { schema?: Schema; noRefs?: boolean }): string
+}

@@ -108,7 +108,8 @@ ok(sub.ok === true, 'subpackages 正常')
 
 console.log('\n== 5. 安装门 / 装前体检 ==')
 const gate = await gw.analyzeCandidateConflicts('omdsh-dev', 'DSH-better-sidebar')
-ok(gate.block.some((b) => b.includes('入口文件缺失')), 'DSH-better-sidebar 被安装门拦截(入口缺失)')
+ok(!gate.block.some((b) => b.includes('入口文件缺失')), 'DSH-better-sidebar 不再被拦(有 prepare 构建脚本,安装时生成)')
+ok(gate.warn.some((w) => w.includes('入口文件缺失') && w.includes('构建脚本')), 'DSH-better-sidebar 降级为构建脚本提示')
 const health = await gw.analyzeCandidateHealth('liustack', 'modlens', 'plugin')
 ok(health.status === 'error', 'modlens 体检报 error(dist 缺失)')
 

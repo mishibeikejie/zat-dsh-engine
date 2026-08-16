@@ -15,13 +15,40 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import * as yaml from 'js-yaml'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 import bundledKinds from '../data/kinds.json'
+import marketSnapshot from '../data/market-snapshot.json'
+
+/** 内置市场快照条目(短字段压缩体积,生成自 scripts/gen-market-snapshot.mjs)。 */
+interface SnapshotEntry {
+  f: string; n: string; o: string; d: string; s: number; k: number; l: string
+  t: string[]; u: string; h: string; p: string
+}
 
 /** Host platform facts (this package is a plain Node ESM module). */
 const IS_WIN = process.platform === 'win32'
+
+/**
+ * The dsh loader's `cordis.patch.yml` dialect: `!!js` scalars round-trip as
+ * `{ __jsExpr }` nodes. We mirror the harness's own `entryListSchema`
+ * (JSON_SCHEMA + one `!!js` type) so reading/writing the profile patch layer
+ * can never drift from what the include mounts or corrupt a user's `!!js`
+ * entries.
+ */
+function isJsExpr(value: unknown): boolean {
+  return value instanceof Object && '__jsExpr' in (value as object)
+}
+const JS_EXPR_TYPE = new yaml.Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  resolve: (data) => typeof data === 'string',
+  construct: (data) => ({ __jsExpr: data }),
+  predicate: isJsExpr as (data: unknown) => boolean,
+  represent: (data) => (data as { __jsExpr: string }).__jsExpr,
+})
+const PATCH_SCHEMA = yaml.JSON_SCHEMA.extend(JS_EXPR_TYPE)
 
 /** Repositories that ARE the DeepSeek Harness itself (never installable). */
 const HARNESS_REPOS = ['deepseek-ai/deepseek-harness']
@@ -57,12 +84,56 @@ function isMarketPluginText(hostText: string, clientText: string): boolean {
 /** Names a plugin REGISTERS: host services/provides, client slot registrations. */
 function extractRegisteredNames(text: string, side: 'host' | 'client'): Set<string> {
   const names = new Set<string>()
-  const re = side === 'host'
-    ? /(?:provide|service)\s*\(\s*['"]([^'"]{3,})['"]/g
-    : /register\s*\(\s*['"]([^'"]{3,})['"]/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(String(text || ''))) !== null) names.add(m[1]!)
+  const src = String(text || '')
+  if (side === 'host') {
+    const re = /(?:provide|service)\s*\(\s*['"]([^'"]{3,})['"]/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(src)) !== null) names.add(m[1]!)
+  } else {
+    // 字符串形式:register('xxx') / slots.register('xxx')。
+    const reStr = /register\s*\(\s*['"]([^'"]{3,})['"]/g
+    let m: RegExpExecArray | null
+    while ((m = reStr.exec(src)) !== null) names.add(m[1]!)
+    // 对象形式:register({ ... id: 'xxx' ... })。槽位 item 的 id 是它在那个
+    // 槽位里的唯一身份 —— 两个主题如果抢同一个 id,就是"改同一个位置"的冲突。
+    const reId = /register\s*\(\s*\{[\s\S]{0,200}?\bid\s*:\s*['"]([^'"]{2,})['"]/g
+    while ((m = reId.exec(src)) !== null) names.add(m[1]!)
+  }
   return names
+}
+
+/** 包有没有会触发 pnpm 构建拦截的脚本(prepare/preinstall/install/postinstall)。 */
+function hasBuildScript(scripts?: Record<string, string>): boolean {
+  if (!scripts) return false
+  return ['prepare', 'preinstall', 'install', 'postinstall'].some((k) => Boolean(scripts[k]))
+}
+
+/** 从 pnpm 的 PREPARE_NOT_ALLOWED 报错里抠出被拦的包名。 */
+function extractBuildName(errText: string): string | null {
+  // "The prepare script of dependency "theme-x" was not run…"
+  const m1 = /prepare\s+script of\s+(?:dependency\s+)?["']?([^"'\s,]+)/i.exec(errText)
+  if (m1?.[1]) return m1[1].trim()
+  // "Ignored build scripts: theme-x, other-pkg."
+  const m2 = /Ignored build scripts:\s*([^\n.]+)/i.exec(errText)
+  if (m2?.[1]) {
+    const first = m2[1].split(',')[0]!.trim()
+    if (first) return first
+  }
+  return null
+}
+
+/**
+ * 发布在 npm 上的 @deepseek-ai 辅助库(不是宿主挂载的核心服务包)。
+ * 直接依赖它们可以正常安装;host 核心包(cordis、dsh 系、typert 系)必须走 peer。
+ */
+const ALLOWED_OFFICIAL_DEPS = new Set(['@deepseek-ai/schemastery', '@deepseek-ai/cosmokit'])
+
+/** 判断一个 @deepseek-ai/* 包是不是宿主核心(必须 peer 引用,不能直接依赖)。 */
+function isHostCorePackage(name: string): boolean {
+  if (!name.startsWith('@deepseek-ai/')) return false
+  if (ALLOWED_OFFICIAL_DEPS.has(name)) return false
+  const bare = name.slice('@deepseek-ai/'.length)
+  return /^cordis$/i.test(bare) || /^dsh-/.test(bare) || /^typert/.test(bare) || /^invariants$/i.test(bare)
 }
 
 /** 从宿主/界面代码里提取"这个插件装完怎么用"的可读提示。 */
@@ -176,11 +247,16 @@ interface JsonObject {
   [key: string]: unknown
 }
 
-const TTL = 10 * 60 * 1000
+/** installedMap 的返回形状(装了什么、是否启用)。 */
+type InstalledMap = Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean; stars?: number }>
+
+// 列表缓存 24h:仓库列表变化很慢,重启后同查询直接读磁盘缓存(见 plugin-market-list.json),
+// 不消耗 GitHub 配额;安装/卸载会主动清缓存,版本更新检测走独立通道不受影响。
+const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.5.0'
+const SELF_VERSION = '0.6.0'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -300,6 +376,42 @@ function safePackageName(value: string): string | null {
   return /^@?[\w.-]+(?:\/[\w.-]+)?$/.test(v) ? v : null
 }
 
+/** 读取 SKILL.md / 平铺 .md 的 frontmatter `name`;与 dsh 的发现规则一致,必须同时有 name + description。 */
+function skillNameFrom(file: string): string | null {
+  let text: string
+  try { text = readFileSync(file, 'utf8') } catch { return null }
+  const m = text.match(/^\uFEFF?---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/)
+  if (!m) return null
+  const fm = m[1] || ''
+  const name = fm.match(/^name:\s*(.+?)\s*$/m)
+  const desc = fm.match(/^description:\s*(.+?)\s*$/m)
+  if (!name || !desc) return null
+  return String(name[1]).replace(/^['"]|['"]$/g, '').trim()
+}
+
+/** 扫描一个仓库工作树里的 dsh 技能:顶层 `x/SKILL.md` 目录包,或顶层 `x.md` 平铺技能(跳过 README)。 */
+function scanSkills(root: string): Array<{ dir: string; name: string }> {
+  const out: Array<{ dir: string; name: string }> = []
+  let entries
+  try { entries = readdirSync(root, { withFileTypes: true }) } catch { return out }
+  for (const e of entries as Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>) {
+    if (!safeSkillEntryName(e.name)) continue
+    if (e.isDirectory()) {
+      const nm = skillNameFrom(join(root, e.name, 'SKILL.md'))
+      if (nm) out.push({ dir: e.name, name: nm })
+    } else if (e.isFile() && e.name.endsWith('.md') && !/^readme(\.|$)/i.test(e.name)) {
+      const nm = skillNameFrom(join(root, e.name))
+      if (nm) out.push({ dir: e.name, name: nm })
+    }
+  }
+  return out
+}
+
+/** 技能目录/文件名必须是单一安全段(无 / 或 \、不为 . / ..、不以 . 开头),防清单被手改后删到别处。 */
+function safeSkillEntryName(v: string): boolean {
+  return v.length > 0 && v !== '.' && v !== '..' && !v.includes('/') && !v.includes('\\') && !v.startsWith('.')
+}
+
 /** 装前体检的一条结论。 */
 interface HealthIssue {
   level: 'error' | 'warn'
@@ -341,7 +453,7 @@ const ALLOWED_HOSTS = new Set([
   'aliyuncs.com', 'aliyun.com', 'dashscope.aliyuncs.com', 'baidu.com', 'aip.baidubce.com', 'qcloud.com', 'tencentcloud.com', 'tencentcloudapi.com',
   'siliconflow.cn', 'api.siliconflow.cn', 'bigmodel.cn', 'open.bigmodel.cn', 'moonshot.cn', 'api.moonshot.cn', 'deepinfra.com', 'api.deepinfra.com',
   'volces.com', 'ark.cn-beijing.volces.com', 'zhipuai.cn', 'open.zhipuai.cn', 'qwen.ai', 'dashscope-intl.aliyuncs.com',
-  'localhost', '127.0.0.1', '0.0.0.0', '::1', 'example.com', 'w3.org', 'json-schema.org', 'schemastore.org', 'nodejs.org', 'crates.io', 'pypi.org',
+  'localhost', '127.0.0.1', '0.0.0.0', '::1', 'example.com', 'w3.org', 'www.w3.org', 'json-schema.org', 'schemastore.org', 'nodejs.org', 'crates.io', 'pypi.org',
   // 库/文档类噪声域名(react-dom 错误链接、封面图 CDN 等),不构成"网络去向"。
   'githubassets.com', 'opengraph.githubassets.com', 'avatars.githubusercontent.com', 'camo.githubusercontent.com', 'reactjs.org', 'react.dev', 'mozilla.org', 'developer.mozilla.org', 'mdn.io', 'jsfiddle.net', 'codepen.io', 'stackoverflow.com', 'typescriptlang.org',
 ])
@@ -422,6 +534,10 @@ export class ZatMarketGateway extends TypertRemoteService {
   private profileNameValue: string | null = null
   private zhCacheFile: string | null = null
   private cacheDirty = false
+  private listCacheFile: string | null = null
+  private listCacheLoaded = false
+  /** 缓存世代:安装/卸载等变更时 +1,后台刷新/写盘发现世代变了就丢弃,避免旧状态回写。 */
+  private cacheEpoch = 0
   private mirrorDown = false
   private directDown = false
   private zhLoaded = false
@@ -576,7 +692,7 @@ export class ZatMarketGateway extends TypertRemoteService {
             description: String(it.description || ''),
             url: String(it.html_url || `https://github.com/${fullName}`),
           }
-        })
+        }).filter((it) => it.fullName.toLowerCase() !== SELF_REPO) // 市场自己不作为候选体检
         // 先给 unknown 的候选补一次真实分类(读根 package.json,不行再查子包),
         // 避免把多子包仓库误标成"不可直接安装"。
         await Promise.all(picked.map(async (it) => {
@@ -605,8 +721,8 @@ export class ZatMarketGateway extends TypertRemoteService {
               return budget
             }
             const kind = this.kindOf(lower)
-            if (kind !== 'plugin' && kind !== 'multi' && kind !== 'unknown') {
-              const skip: HealthResult = { status: 'skip', summary: '不是可直接安装的插件,跳过体检', checks: [] }
+            if (kind !== 'plugin' && kind !== 'multi' && kind !== 'client' && kind !== 'unknown') {
+              const skip: HealthResult = { status: 'skip', summary: kind === 'skill' ? '技能包:无需代码体检,可在插件市场直接点「安装」装进 skills 目录' : '不是可直接安装的插件,跳过体检', checks: [] }
               return skip
             }
             return this.withHealthTimeout(this.analyzeCandidateHealth(it.owner, it.repo, kind), lower)
@@ -616,7 +732,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const items = picked.map((it, i) => {
           const kind = this.kindOf(it.fullName.toLowerCase())
           const cachedZh = this.zhCache.get(it.fullName.toLowerCase())
-          const installable = kind === 'plugin' || kind === 'multi'
+          const installable = kind === 'plugin' || kind === 'multi' || kind === 'client' || kind === 'skill'
           return {
             fullName: it.fullName,
             name: it.name,
@@ -625,7 +741,13 @@ export class ZatMarketGateway extends TypertRemoteService {
             zhIntro: (cachedZh && cachedZh.zh) || '',
             kind,
             installable,
-            install: kind === 'plugin' ? `dsh plugin --profile web add github:${it.fullName}` : '',
+            install: kind === 'plugin'
+              ? `dsh plugin --profile web add github:${it.fullName}`
+              : kind === 'client'
+                ? '在插件市场点「安装」一键装(主题/界面插件,刷新页面生效)'
+                : kind === 'skill'
+                  ? '在插件市场点「安装」一键装(技能包,装进 ~/.dsh/skills 立即生效)'
+                  : '',
             url: it.url,
             health: healths[i]!,
           }
@@ -647,7 +769,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /** Spawn one shell command line; returns the live handle for streaming reads. */
-  private async spawnShell(command: string, cwd?: string): Promise<SpawnHandle> {
+  private async spawnShell(command: string, cwd?: string, graceMs = 120000): Promise<SpawnHandle> {
     let argv: string[]
     if (IS_WIN) {
       let exe = 'powershell.exe'
@@ -662,13 +784,13 @@ export class ZatMarketGateway extends TypertRemoteService {
       argv,
       cwd: cwd || this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 8 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
-      graceMs: 120000,
+      graceMs,
     })
   }
 
   /** Run one shell command line on the host platform. */
-  private async runShell(command: string, cwd?: string): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
-    const handle = await this.spawnShell(command, cwd)
+  private async runShell(command: string, cwd?: string, graceMs?: number): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
+    const handle = await this.spawnShell(command, cwd, graceMs)
     const outcome = await handle.done
     let stdout = ''
     let stderr = ''
@@ -686,8 +808,10 @@ export class ZatMarketGateway extends TypertRemoteService {
     const rootPkg = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/package.json`)
     if (rootPkg.status === 200) {
       try {
-        const meta = JSON.parse(rootPkg.body) as { dsh?: { bundle?: { patch?: string } } }
-        return meta.dsh?.bundle?.patch ? 'plugin' : 'nonplugin'
+        const meta = JSON.parse(rootPkg.body) as { dsh?: { bundle?: { patch?: string }; client?: unknown } }
+        // client-only 主题(只有 dsh.client、没有 dsh.bundle)现在也能一键装(自动写 insert),
+        // 单独归一类,让"可安装"筛选把她们算进去。
+        return meta.dsh?.bundle?.patch ? 'plugin' : (meta.dsh?.client ? 'client' : 'nonplugin')
       } catch { return 'nonplugin' }
     }
     const sub = await this.subpackages(owner, repo)
@@ -731,6 +855,102 @@ export class ZatMarketGateway extends TypertRemoteService {
   /** Write a file directly through node:fs (this package is trusted Node code). */
   private async writeFileText(path: string, content: string): Promise<void> {
     writeFileSync(path, content, 'utf8')
+  }
+
+  /** Parse the profile's cordis.patch.yml into a patch-entry array ([] when absent/empty). */
+  private async readPatches(): Promise<unknown[]> {
+    try {
+      const dir = await this.getProfileDir()
+      const content = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+      const parsed = yaml.load(content, { schema: PATCH_SCHEMA })
+      return Array.isArray(parsed) ? parsed : []
+    } catch { return [] }
+  }
+
+  /** Persist a patch-entry array back to cordis.patch.yml (same `!!js` dialect). */
+  private async writePatches(patches: unknown[]): Promise<void> {
+    const dir = await this.getProfileDir()
+    await this.writeFileText(join(dir, 'cordis.patch.yml'), yaml.dump(patches, { schema: PATCH_SCHEMA, noRefs: true }))
+  }
+
+  /** Package names currently registered as client-only `insert` rows in the patch layer. */
+  private async clientInsertNames(): Promise<Set<string>> {
+    const set = new Set<string>()
+    for (const patch of await this.readPatches()) {
+      if (!patch || typeof patch !== 'object') continue
+      const insert = (patch as { insert?: unknown }).insert
+      if (!Array.isArray(insert)) continue
+      for (const row of insert) {
+        if (row && typeof row === 'object' && typeof (row as { name?: unknown }).name === 'string') {
+          set.add((row as { name: string }).name)
+        }
+      }
+    }
+    return set
+  }
+
+  /** True when a package declares `dsh.client` (a client-only surface plugin). */
+  private async isClientOnlyPackage(name: string): Promise<boolean> {
+    try {
+      const dir = await this.getProfileDir()
+      const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { client?: unknown; bundle?: { patch?: string } } }
+      return Boolean(meta.dsh?.client) && !meta.dsh?.bundle?.patch
+    } catch { return false }
+  }
+
+  /** Ensure a client-only plugin has an `insert` row (auto-enable); returns true when it was added. */
+  private async upsertClientInsert(pkgName: string): Promise<boolean> {
+    const names = await this.clientInsertNames()
+    if (names.has(pkgName)) return false
+    const patches = await this.readPatches()
+    patches.push({ insert: [{ id: pkgName, name: pkgName }] })
+    await this.writePatches(patches)
+    return true
+  }
+
+  /** Remove every `insert` row that loads `pkgName`; returns true when anything changed. */
+  private async removeClientInsert(pkgName: string): Promise<boolean> {
+    const patches = await this.readPatches()
+    let changed = false
+    for (const patch of patches) {
+      if (!patch || typeof patch !== 'object') continue
+      const insert = (patch as { insert?: unknown[] }).insert
+      if (!Array.isArray(insert)) continue
+      const before = insert.length
+      ;(patch as { insert: unknown[] }).insert = insert.filter((row) => !(row && typeof row === 'object' && (row as { name?: unknown }).name === pkgName))
+      if (insert.length !== before) changed = true
+    }
+    const cleaned = patches.filter((patch) => {
+      if (!patch || typeof patch !== 'object') return true
+      const insert = (patch as { insert?: unknown[] }).insert
+      const hasOtherKeys = Object.keys(patch as object).some((k) => k !== 'insert')
+      // Drop an insert-only patch that became empty; keep patches with other keys.
+      if (!Array.isArray(insert)) return true
+      if (insert.length === 0 && !hasOtherKeys) return false
+      return true
+    })
+    if (changed || cleaned.length !== patches.length) {
+      await this.writePatches(cleaned)
+      return true
+    }
+    return false
+  }
+
+  /** 把包名加进 pnpm-workspace.yaml 的 allowBuilds,让它的构建脚本能跑。幂等。 */
+  private async ensureAllowBuilds(name: string): Promise<void> {
+    try {
+      const dir = await this.getProfileDir()
+      const wsPath = join(dir, 'pnpm-workspace.yaml')
+      let ws: Record<string, unknown> = {}
+      try {
+        const parsed = yaml.load(readFileSync(wsPath, 'utf8'), { schema: PATCH_SCHEMA })
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ws = parsed as Record<string, unknown>
+      } catch { /* missing/unparsable → start fresh */ }
+      const allow = Array.isArray(ws.allowBuilds) ? (ws.allowBuilds as unknown[]) : []
+      if (allow.includes(name)) return
+      ws.allowBuilds = [...allow, name]
+      await this.writeFileText(wsPath, yaml.dump(ws, { schema: PATCH_SCHEMA, noRefs: true }))
+    } catch { /* best effort — 装不上时安装流程会报真正的错 */ }
   }
 
   /**
@@ -791,7 +1011,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!candidatePkg && !candidateMarketish) return null
     try {
       const p = await this.readProfile()
-      const inst = this.installedMap(p)
+      const inst = await this.installedMap(p)
       // Already installed? Then this is a reinstall / update of an existing
       // pair member — updating it must not be blocked (the pair is not new).
       // installedMap keys aliases of the SAME record under several names;
@@ -916,11 +1136,11 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /** Fetch a candidate repo's manifest and code files (network, mirror-backed). */
-  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; missingEntries: string[]; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } } } | null> {
+  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; missingEntries: string[]; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; scripts?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } } | null> {
     const base = subdir ? `${subdir}/` : ''
     const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
     if (pkgRes.status !== 200) return null
-    let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } } = {}
+    let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; os?: string[]; cpu?: string[]; scripts?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
     try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return null }
     const declared: string[] = []
     if (typeof meta.main === 'string' && meta.main) declared.push(meta.main)
@@ -959,7 +1179,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async anyInstalledMarketish(): Promise<string | null> {
     try {
       const p = await this.readProfile()
-      const inst = this.installedMap(p)
+      const inst = await this.installedMap(p)
       for (const rec of new Set(Object.values(inst))) {
         if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) {
           return rec.name
@@ -1016,6 +1236,22 @@ export class ZatMarketGateway extends TypertRemoteService {
     return (await this.installedVersionOf(name)) !== null
   }
 
+  /**
+   * True when an installed package declares `dsh.bundle.patch` — i.e. it is a
+   * profile bundle that may join `dsh.profile.bundles`. A package without that
+   * declaration (e.g. a client-only theme) must NEVER be pushed into bundles:
+   * the dsh loader reads every bundles entry expecting `dsh.bundle`, and one
+   * that lacks it makes dsh refuse to start ("declares no dsh.bundle"). This
+   * mirrors the official `dsh plugin` reconcile rule.
+   */
+  private async isBundlePackage(name: string): Promise<boolean> {
+    try {
+      const dir = await this.getProfileDir()
+      const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
+      return Boolean(meta.dsh?.bundle?.patch)
+    } catch { return false }
+  }
+
   /** Every loader row id declared by an installed bundle, mapped to its package. */
   private async installedPatchIds(): Promise<Map<string, string>> {
     const map = new Map<string, string>()
@@ -1039,7 +1275,7 @@ export class ZatMarketGateway extends TypertRemoteService {
    * Pre-install conflict analysis against the candidate repo's manifest and
    * code. Hard problems block the install; soft problems become warnings.
    */
-  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[]; usage: string[] }> {
+  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[]; usage: string[]; name?: string; scripts?: Record<string, string> }> {
     const block: string[] = []
     const warn: string[] = []
     const f = await this.fetchCandidateTexts(owner, repo, subdir)
@@ -1047,15 +1283,21 @@ export class ZatMarketGateway extends TypertRemoteService {
     const meta = f.meta
     // (0) Declared entry files must exist in the repo — a plugin pointing at
     // uncommitted build artifacts (dist not committed) installs but can never
-    // load. Block it here instead of letting pnpm fail (or worse, succeed and
-    // break dsh on the next restart).
+    // load. BUT: a build script (prepare/preinstall/install/postinstall) can
+    // generate those files at install time — such plugins are installable
+    // (auto-allowBuilds handles the pnpm block), so only warn.
     if (f.missingEntries.length > 0) {
-      block.push(`入口文件缺失:${f.missingEntries.join('、')} — 构建产物没提交到仓库,装了也加载不起来`)
+      if (hasBuildScript(meta.scripts)) {
+        warn.push(`入口文件缺失(${f.missingEntries.join('、')}),但声明了构建脚本会在安装时现场生成 — 会自动放行构建脚本,装完重启生效`)
+      } else {
+        block.push(`入口文件缺失:${f.missingEntries.join('、')} — 构建产物没提交到仓库,装了也加载不起来`)
+      }
     }
-    // (1) Official packages must be peers, never direct deps — a direct dep
-    // installs a second copy and hijacks the official loader rows.
+    // (1) Host-core official packages must be peers, never direct deps — a
+    // direct dep installs a second copy and hijacks the official loader rows.
+    // npm-published helper libs (@deepseek-ai/schemastery 等) are fine as deps.
     for (const d of Object.keys(meta.dependencies || {})) {
-      if (d.startsWith('@deepseek-ai/')) block.push(`官方包${d}应为peer依赖`)
+      if (isHostCorePackage(d)) block.push(`官方包${d}应为peer依赖`)
     }
     // (1b) System/CPU compatibility: a plugin that declares it does not support
     // this OS/arch would break dsh on the next restart — block up front.
@@ -1118,7 +1360,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const sec of scanSecurity(f.clientText, '界面代码')) {
       warn.push(`安全提示:${sec.title}`)
     }
-    return { block, warn, usage: describeUsage(f.hostText, f.clientText) }
+    return { block, warn, usage: describeUsage(f.hostText, f.clientText), name: meta.name, scripts: meta.scripts }
   }
 
   // ── find_plugin 装前体检 ────────────────────────────────────────────────
@@ -1178,7 +1420,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         scripts?: Record<string, string>
         os?: string[]
         cpu?: string[]
-        dsh?: { bundle?: { patch?: string } }
+        dsh?: { bundle?: { patch?: string }; client?: unknown }
       }
       let meta: CandidateMeta
       try {
@@ -1189,7 +1431,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
       if (kind === 'unknown') {
         // 顺手补上仓库分类,后面 installable 判断就准了。
-        this.kindCache.set((owner + '/' + repo).toLowerCase(), meta.dsh?.bundle?.patch ? 'plugin' : 'nonplugin')
+        this.kindCache.set((owner + '/' + repo).toLowerCase(), meta.dsh?.bundle?.patch ? 'plugin' : (meta.dsh?.client ? 'client' : 'nonplugin'))
       }
       const canon = (rel: string): string => rel.replace(/^\.\//, '')
       const entries = new Set<string>()
@@ -1239,14 +1481,18 @@ export class ZatMarketGateway extends TypertRemoteService {
         })(),
       ])
       if (missingEntries.length > 0) {
-        checks.push({ level: 'error', title: `入口文件缺失:${missingEntries.join('、')}`, detail: 'package.json 声明的入口在仓库里不存在——最常见的原因是构建产物(dist)没有提交到 git。装完 dsh 加载就会报错,插件等于用不了。' })
+        if (hasBuildScript(meta.scripts)) {
+          checks.push({ level: 'warn', title: `入口文件缺失:${missingEntries.join('、')}(有构建脚本会现场生成)`, detail: '构建产物没提交到 git,但声明了 prepare/preinstall 等构建脚本,安装时会自动放行构建并生成;若构建失败再重试即可。' })
+        } else {
+          checks.push({ level: 'error', title: `入口文件缺失:${missingEntries.join('、')}`, detail: 'package.json 声明的入口在仓库里不存在——最常见的原因是构建产物(dist)没有提交到 git。装完 dsh 加载就会报错,插件等于用不了。' })
+        }
       }
       if (patchMissing) {
         checks.push({ level: 'error', title: `挂载补丁缺失:${wantPatch}`, detail: 'dsh.bundle.patch 指向的文件不在仓库里,插件装完也不会被挂载,等于没装。' })
       }
-      const officialDeps = Object.keys(meta.dependencies || {}).filter((d) => d.startsWith('@deepseek-ai/'))
+      const officialDeps = Object.keys(meta.dependencies || {}).filter((d) => isHostCorePackage(d))
       if (officialDeps.length > 0) {
-        checks.push({ level: 'error', title: `官方包写进了 dependencies(共 ${officialDeps.length} 个)`, detail: `必须用 peerDependencies 引用:${officialDeps.join('、')}。写成直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。` })
+        checks.push({ level: 'error', title: `官方核心包写进了 dependencies(共 ${officialDeps.length} 个)`, detail: `必须用 peerDependencies 引用:${officialDeps.join('、')}。写成直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。` })
       }
       // 系统/CPU 兼容性:插件用 npm 的 os/cpu 字段声明支持范围,不支持本机就直接标硬伤。
       if (!fieldSupports(meta.os, process.platform)) {
@@ -1380,7 +1626,12 @@ export class ZatMarketGateway extends TypertRemoteService {
    */
   private async pnpmShell(command: string, dir: string, onProgress?: (accumulatedStdout: string) => void): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
     const mirrorWin = "$env:GIT_CONFIG_COUNT=1; $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; $env:GIT_CONFIG_VALUE_0='https://github.com/';"
+    const clearWin = 'Remove-Item Env:GIT_CONFIG_COUNT,Env:GIT_CONFIG_KEY_0,Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue;'
     const mirrorLin = "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; export GIT_CONFIG_VALUE_0='https://github.com/';"
+    const clearLin = 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 2>/dev/null;'
+    // npm 官方源在国内下载慢(几十 KB/s),走 npmmirror 镜像加速依赖下载。
+    const registryWin = "$env:npm_config_registry='https://registry.npmmirror.com';"
+    const registryLin = "export npm_config_registry='https://registry.npmmirror.com';"
     // `pnpm add/remove` calls come in as "pnpm <verb> …"; on Windows the
     // spawned -NoProfile PowerShell may not have pnpm on PATH (nvm/corepack
     // installs). Discover it first, then invoke through the resolved tool.
@@ -1408,13 +1659,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         'if (-not $pnpm) { $pnpm = \'corepack\'; $pnpmArgs = \'pnpm\' } else { $pnpmArgs = \'\' };',
       ].join(' ')
       const run = '& $pnpm $pnpmArgs ' + body
-      if (this.directDown) {
-        full = proxySetup + pnpmSetup + mirrorWin + run
-      } else {
-        full = proxySetup + pnpmSetup + run + '; if ($LASTEXITCODE -ne 0) { ' + mirrorWin + run + ' }'
-      }
+      // 镜像优先:git clone github.com 被墙时走 gh-proxy(2 秒),npm 依赖走 npmmirror 加速,直连兜底。
+      full = proxySetup + registryWin + pnpmSetup + mirrorWin + run + '; if ($LASTEXITCODE -ne 0) { ' + clearWin + run + ' }'
     } else {
-      full = this.directDown ? mirrorLin + command : command + ' || { ' + mirrorLin + command + ' }'
+      full = registryLin + mirrorLin + command + ' || { ' + clearLin + command + ' }'
     }
     if (!onProgress) return this.runShell(full, dir)
     // Streaming variant: poll collected stdout while the command runs.
@@ -1482,6 +1730,106 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.profileDirValue
   }
 
+  /** dsh 用户级技能根目录:<DSH_HOME>/skills(dsh-skill-filesystem 的默认 user-dsh 根)。 */
+  private async getSkillsDir(): Promise<string> {
+    return join(await this.getHome(), 'skills')
+  }
+
+  private async skillManifestPath(): Promise<string> {
+    return join(await this.getHome(), 'zat-skill-installs.json')
+  }
+
+  /** 技能安装清单:owner/repo → 复制进 skills 目录的条目(用于显示已安装 + 一键卸载)。 */
+  private async readSkillManifest(): Promise<Record<string, { owner: string; repo: string; dirs: string[]; names: string[]; stars?: number }>> {
+    try {
+      // 手写/PS 写出来的文件可能带 UTF-8 BOM,JSON.parse 会崩;先剥掉。
+      const raw = readFileSync(await this.skillManifestPath(), 'utf8').replace(/^\uFEFF/, '')
+      const obj = JSON.parse(raw) as Record<string, unknown>
+      const out: Record<string, { owner: string; repo: string; dirs: string[]; names: string[]; stars?: number }> = {}
+      for (const [k, v] of Object.entries(obj)) {
+        if (!v || typeof v !== 'object') continue
+        const e = v as { owner?: unknown; repo?: unknown; dirs?: unknown; names?: unknown; stars?: unknown }
+        if (typeof e.owner !== 'string' || typeof e.repo !== 'string') continue
+        out[k.toLowerCase()] = {
+          owner: e.owner,
+          repo: e.repo,
+          dirs: Array.isArray(e.dirs) ? e.dirs.filter((d): d is string => typeof d === 'string' && safeSkillEntryName(d)) : [],
+          names: Array.isArray(e.names) ? e.names.filter((d): d is string => typeof d === 'string') : [],
+          stars: typeof e.stars === 'number' && e.stars > 0 ? e.stars : undefined,
+        }
+      }
+      return out
+    } catch { return {} }
+  }
+
+  private async writeSkillManifest(manifest: Record<string, { owner: string; repo: string; dirs: string[]; names: string[]; stars?: number }>): Promise<void> {
+    try { await this.writeFileText(await this.skillManifestPath(), JSON.stringify(manifest, null, 2)) } catch { /* best effort */ }
+  }
+
+  /** 技能(skill)包安装:clone 到临时目录 → 扫描 SKILL.md → 复制进 ~/.dsh/skills(立即生效,无需重启)。 */
+  private async installSkillsTask(owner: string, repo: string, taskId: string): Promise<JsonObject> {
+    const o = safeSegment(owner)
+    const r = safeSegment(repo)
+    if (!o || !r) return { ok: false, message: 'invalid repository name' }
+    const staging = mkdtempSync(join(await this.getHome(), 'zat-skill-'))
+    let lastErr = ''
+    try {
+      this.setTaskStep(taskId, 'download', `正在下载 ${o}/${r}…`)
+      this.setTaskProgress(taskId, 8, `正在下载 ${o}/${r}…(网络慢时可能较久,请稍候)`)
+      const cloneDir = join(staging, 'repo')
+      const urls = [
+        `https://gh-proxy.com/https://github.com/${o}/${r}.git`,
+        `https://ghfast.top/https://github.com/${o}/${r}.git`,
+        `https://github.com/${o}/${r}.git`,
+      ]
+      let cloned = false
+      for (const u of urls) {
+        // lowSpeedLimit/lowSpeedTime:镜像卡死时 10 秒内放弃;graceMs 30s 兜底 DNS/连接也卡的情况。
+        const res = await this.runShell(`git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 clone --depth 1 --quiet "${u}" "${cloneDir}"`, undefined, 30000)
+        lastErr = String(res.stderr || res.stdout || '').trim()
+        if (res.outcome.exitCode === 0) { cloned = true; break }
+      }
+      if (!cloned) {
+        if (/git[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(lastErr)) {
+          this.recordIssue('没装 git', '装技能(skill)靠 git clone。解决:装 git(如 winget install Git.Git),再重试。')
+          return { ok: false, message: '没装 git。先装 git(如 winget install Git.Git),再重试。' }
+        }
+        this.recordIssue('技能安装失败', `${o}/${r} 下载失败(网络)。`)
+        return { ok: false, message: '下载失败:连不上 GitHub。请换个网络或稍后重试。' }
+      }
+      this.setTaskStep(taskId, 'verify', '下载完成,正在扫描技能…')
+      const skills = scanSkills(cloneDir)
+      if (skills.length === 0) {
+        return { ok: false, notPlugin: true, kind: 'none', message: '这个仓库里既没有插件声明,也没有可安装的技能(SKILL.md)。它不是 dsh 插件或技能,无法通过市场安装。' }
+      }
+      const skillsDir = await this.getSkillsDir()
+      mkdirSync(skillsDir, { recursive: true })
+      const dirs: string[] = []
+      const names: string[] = []
+      for (const s of skills) {
+        rmSync(join(skillsDir, s.dir), { recursive: true, force: true }) // 重复安装 = 覆盖更新
+        cpSync(join(cloneDir, s.dir), join(skillsDir, s.dir), { recursive: true })
+        dirs.push(s.dir)
+        names.push(s.name)
+      }
+      const manifest = await this.readSkillManifest()
+      // 顺手抓一下仓库星数,存进清单,让"已安装"列表里星数不是 0。
+      let stars: number | undefined
+      try {
+        const metaRes = await this.ghGet(`https://api.github.com/repos/${o}/${r}`)
+        if (metaRes.status === 200) stars = (JSON.parse(metaRes.body) as { stargazers_count?: number }).stargazers_count
+      } catch { /* 抓不到就留空 */ }
+      manifest[(o + '/' + r).toLowerCase()] = { owner: o, repo: r, dirs, names, stars }
+      await this.writeSkillManifest(manifest)
+      this.invalidateListCache()
+      this.setTaskProgress(taskId, 97, '安装完成')
+      const first = names[0] || ''
+      return { ok: true, packageName: o + '/' + r, kind: 'skill', skills: names, message: `已安装技能 ${names.join('、')} — 立即生效(无需重启)。${first ? `用 /${first} 或在对话里让它按技能名调用。` : ''}` }
+    } finally {
+      rmSync(staging, { recursive: true, force: true })
+    }
+  }
+
   /**
    * Read the effective HTTP proxy once. Windows: the system proxy from the
    * registry (what a VPN's system-proxy mode sets); other platforms: the
@@ -1489,6 +1837,8 @@ export class ZatMarketGateway extends TypertRemoteService {
    */
   private proxyUrl: string | null = null
   private proxyLoaded = false
+  /** 代理(VPN)断开/失效后置真:后续 httpGet 直接跳过代理,不再每请求傻等它超时。 */
+  private proxyDown = false
 
   private async loadProxy(): Promise<string | null> {
     if (this.proxyLoaded) return this.proxyUrl
@@ -1516,13 +1866,15 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async httpGet(url: string): Promise<{ status: number; body: string; error?: string }> {
     let lastError = ''
     const proxy = await this.loadProxy()
-    if (proxy) {
-      const r = await this.curlGet(url, proxy, '30')
+    // 代理只在已知可用时才试,而且给短超时(3s):VPN 一断就立刻换直连,不傻等。
+    if (proxy && !this.proxyDown) {
+      const r = await this.curlGet(url, proxy, '2')
       if (r.status > 0) return r
+      this.proxyDown = true // 代理连不通,后续跳过
       lastError = r.error || ''
     }
-    const direct = await this.curlGet(url, null, '10')
-    if (direct.status > 0) return direct
+    const direct = await this.curlGet(url, null, '3')
+    if (direct.status > 0) { this.proxyDown = false; return direct } // 直连通了,代理可能又活了
     lastError = direct.error || lastError
     const viaWget = await this.wgetGet(url)
     if (viaWget.status > 0) return viaWget
@@ -1565,7 +1917,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     try { wget = await this.subprocess.resolveExecutable('wget') } catch { wget = '' }
     if (!wget) return { status: 0, body: '', error: 'wget not available' }
     const handle = this.subprocess.spawn({
-      argv: [wget, '-q', '-O-', '--server-response', '--timeout=12', '--max-redirect=5', '-U', 'zat-dsh-engine/0.3.1', url],
+      argv: [wget, '-q', '-O-', '--server-response', '--timeout=5', '--max-redirect=5', '-U', 'zat-dsh-engine/0.3.1', url],
       cwd: this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
       graceMs: 60000,
@@ -1586,7 +1938,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async fetchGet(url: string): Promise<{ status: number; body: string; error?: string }> {
     try {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 10000)
+      const timer = setTimeout(() => controller.abort(), 5000)
       try {
         const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'zat-dsh-engine/0.3.1' } })
         return { status: res.status, body: await res.text() }
@@ -1600,29 +1952,19 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   private async ghGet(url: string): Promise<{ status: number; body: string; error?: string }> {
     let lastError = ''
-    if (!this.directDown) {
-      const r = await this.httpGet(url)
-      if (r.status === 200) return r
-      // A definitive HTTP answer (404/403/…) is the same on the mirror —
-      // return it instead of burning three more requests.
-      if (r.status >= 400) return r
-      lastError = r.error || ''
-      this.directDown = true
-    }
+    // 镜像优先:这台机器直连 GitHub 被墙、VPN 代理又可能"连着但超时",gh-proxy 镜像
+    // 是不依赖 VPN 的稳路。直接 curl 镜像(不走那个可能超时的代理),4s 超时,连不通立刻换直连/代理。
     if (!this.mirrorDown) {
-      const mr = await this.httpGet(MIRROR + url)
+      const mr = await this.curlGet(MIRROR + url, null, '4')
       if (mr.status === 200) return mr
-      if (mr.status >= 400) return mr
-      lastError = mr.error || lastError
+      if (mr.status >= 400) return mr // 404/403 等确定答案:镜像和直连一样,直接返回,不浪费请求
+      lastError = mr.error || ''
       this.mirrorDown = true
     }
-    const r2 = await this.httpGet(url)
-    if (r2.status === 200) { this.directDown = false; return r2 }
-    lastError = r2.error || lastError
-    const mr2 = await this.httpGet(MIRROR + url)
-    if (mr2.status === 200) { this.mirrorDown = false; return mr2 }
-    lastError = mr2.error || lastError
-    return { status: 0, body: '', error: lastError }
+    const r = await this.httpGet(url)
+    if (r.status === 200) { this.mirrorDown = false; return r }
+    if (r.status >= 400) return r
+    return { status: 0, body: '', error: r.error || lastError }
   }
 
   /**
@@ -1666,18 +2008,19 @@ export class ZatMarketGateway extends TypertRemoteService {
     await this.writeFileText(join(dir, 'package.json'), JSON.stringify(obj, null, 2))
   }
 
-  private installedMap(p: JsonObject): Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean }> {
-    const map: Record<string, { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean }> = {}
+  private async installedMap(p: JsonObject): Promise<InstalledMap> {
+    const map: InstalledMap = {}
     const deps = (p.dependencies || {}) as Record<string, string>
-    // Only bundle packages that are also listed in dsh.profile.bundles are
-    // actually loaded by the dsh loader; a dependency missing from bundles
-    // installs but never activates.
+    // A plugin is loaded when it is a bundle listed in dsh.profile.bundles, OR
+    // a client-only surface registered as an `insert` row in cordis.patch.yml.
+    // A dependency in neither installs but never activates.
     const bundles: string[] = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
       ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
       : []
+    const clientInserts = await this.clientInsertNames()
     for (const key of Object.keys(deps)) {
       const spec = String(deps[key] || '')
-      const rec: { name: string; spec: string; owner?: string; repo?: string; subdir?: string; enabled: boolean } = { name: key, spec, enabled: bundles.includes(key) }
+      const rec: InstalledMap[string] = { name: key, spec, enabled: bundles.includes(key) || clientInserts.has(key) }
       map[key.toLowerCase()] = rec
       const bare = key.replace(/^@[\w.-]+\//, '')
       if (!map[bare.toLowerCase()]) map[bare.toLowerCase()] = rec
@@ -1689,6 +2032,14 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (pathMatch) rec.subdir = decodeURIComponent(pathMatch[1]).replace(/^\/+/, '')
         map[(gitMatch[1] + '/' + gitMatch[2]).toLowerCase()] = rec
       }
+    }
+    // 技能(skill)不算 cordis 插件,不写进 dependencies/bundles;用清单文件记录,让
+    // 列表和"已安装"筛选能把它们当成已安装,并支持一键卸载。
+    const skillManifest = await this.readSkillManifest()
+    for (const key of Object.keys(skillManifest)) {
+      const entry = skillManifest[key]!
+      if (entry.dirs.length === 0) continue
+      map[key.toLowerCase()] = { name: entry.owner + '/' + entry.repo, spec: 'skill:' + key, owner: entry.owner, repo: entry.repo, enabled: true, stars: entry.stars }
     }
     return map
   }
@@ -1706,6 +2057,41 @@ export class ZatMarketGateway extends TypertRemoteService {
   /** Mutating operations must drop stale list snapshots or cards show outdated install state. */
   private invalidateListCache(): void {
     this.caches.clear()
+    this.cacheEpoch++ // 让后台刷新/未完成的写盘丢弃过期结果
+    // 内存缓存清掉的同时删掉磁盘缓存:重启后也不会读到"已安装/已卸载"的旧状态。
+    if (this.listCacheFile) {
+      try { unlinkSync(this.listCacheFile) } catch { /* 文件不存在 */ }
+    }
+  }
+
+  /** 列表缓存持久化到 profile 目录:重启后同查询直接读磁盘,不再消耗 GitHub 配额。 */
+  private async loadListCache(): Promise<void> {
+    if (this.listCacheLoaded) return
+    this.listCacheLoaded = true
+    try {
+      const dir = await this.getProfileDir()
+      this.listCacheFile = join(dir, 'plugin-market-list.json')
+    } catch { return }
+    try {
+      const raw = readFileSync(this.listCacheFile, 'utf8')
+      const obj = JSON.parse(raw) as Record<string, { at?: number; data?: unknown }>
+      for (const [k, v] of Object.entries(obj)) {
+        if (v && typeof v === 'object' && typeof v.at === 'number' && 'data' in v) {
+          this.caches.set(k, { at: v.at, data: v.data })
+        }
+      }
+    } catch { /* 文件不存在或损坏 → 忽略,重新拉取 */ }
+  }
+
+  /** 把当前列表缓存写回磁盘(小文件,调用频率低,直接写)。epoch 变化(安装/卸载清过缓存)就放弃。 */
+  private async saveListCache(epoch?: number): Promise<void> {
+    if (!this.listCacheFile) return
+    try {
+      const obj: Record<string, { at: number; data: unknown }> = {}
+      for (const [k, v] of this.caches) obj[k] = { at: v.at, data: v.data }
+      if (epoch !== undefined && epoch !== this.cacheEpoch) return
+      await this.writeFileText(this.listCacheFile, JSON.stringify(obj))
+    } catch { /* best effort */ }
   }
 
   private async loadZhCache(): Promise<void> {
@@ -1845,7 +2231,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     while (this.recentIssues.length > 30) this.recentIssues.shift()
   }
 
-  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[] }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
+  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[]; name?: string; scripts?: Record<string, string> }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string; installedAsDisabled?: boolean; hotReload?: boolean }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
@@ -1861,6 +2247,10 @@ export class ZatMarketGateway extends TypertRemoteService {
     const warnings = analysis.warn.length > 0 ? analysis.warn.join('; ') : undefined
     this.invalidateListCache()
     const snap = await this.snapshotProfile(dir)
+    // 带构建脚本的 git 插件会被 pnpm 默认拦掉:先把包名放进 allowBuilds,争取一次装成。
+    if (analysis.name && hasBuildScript(analysis.scripts)) {
+      await this.ensureAllowBuilds(analysis.name)
+    }
     if (taskId) {
       this.setTaskStep(taskId, 'download', '正在下载安装包…')
       this.setTaskProgress(taskId, 12, '正在下载安装包…(已进行 0 秒)')
@@ -1886,6 +2276,23 @@ export class ZatMarketGateway extends TypertRemoteService {
       const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
       if (alt.outcome.exitCode === 0) pnpmResult = alt
     }
+    // 构建脚本被拦(PREPARE_NOT_ALLOWED):自动把包名写进 allowBuilds 再重试一次。
+    // git 托管的插件普遍要跑 prepare 构建,不该让用户手动改配置文件。
+    if (pnpmResult.outcome.exitCode !== 0) {
+      const firstErr = String(pnpmResult.stderr || pnpmResult.stdout || '')
+      if (/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) {
+        const allowedName = extractBuildName(firstErr) || analysis.name || null
+        if (allowedName) {
+          await this.restoreProfile(dir, snap)
+          await this.ensureAllowBuilds(allowedName)
+          pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+          for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
+            const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
+            if (alt.outcome.exitCode === 0) pnpmResult = alt
+          }
+        }
+      }
+    }
     if (pnpmResult.outcome.exitCode !== 0) {
       await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
@@ -1894,8 +2301,8 @@ export class ZatMarketGateway extends TypertRemoteService {
         return { ok: false, packageName: null, message: '没装 pnpm。先跑一条: corepack enable(或 npm i -g pnpm),再重试。' }
       }
       if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
-        this.recordIssue('插件要跑构建脚本被拦截', '在 pnpm-workspace.yaml 的 allowBuilds 里加该插件名再试。', 'warn')
-        return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本被 pnpm 拦截(已还原)。在 pnpm-workspace.yaml 的 allowBuilds 里加上该插件名再试。' }
+        this.recordIssue('插件要跑构建脚本被拦截', '已自动尝试放行该插件的构建脚本,仍被拦;请手动检查 pnpm-workspace.yaml 的 allowBuilds 是否有该包名。', 'warn')
+        return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本,已自动放行仍被拦(已还原)。可手动在 pnpm-workspace.yaml 的 allowBuilds 里确认该包名后重试。' }
       }
       const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
       const accessDenied = /UnauthorizedAccess|EACCES|EPERM|access is denied|access denied|拒绝访问|没有权限|权限不够|Permission Denied/i.test(errText)
@@ -1923,15 +2330,18 @@ export class ZatMarketGateway extends TypertRemoteService {
     let added: string | null = null
     let matched = false
     let missingBundle = false
+    let clientOnly = false
+    let matchedName: string | null = null
     for (const name of deps) {
       if (bundles.includes(name)) continue
       const specVal = String(((after.dependencies || {}) as Record<string, string>)[name] || '')
       if (!specVal.toLowerCase().includes(o.toLowerCase() + '/' + repoName.toLowerCase())) continue
       matched = true
+      matchedName = name
       try {
-        const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string } } }
+        const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { dsh?: { bundle?: { patch?: string }; client?: unknown } }
         if (meta.dsh?.bundle?.patch) { bundles.push(name); added = name }
-        else missingBundle = true
+        else { missingBundle = true; if (meta.dsh?.client) clientOnly = true }
       } catch { /* node_modules missing — treat as failure below */ }
     }
     if (added) {
@@ -1953,7 +2363,22 @@ export class ZatMarketGateway extends TypertRemoteService {
       return { ok: true, packageName: added, warning: warnings }
     }
     if (missingBundle) {
-      return { ok: false, packageName: null, message: '安装完成,但该仓库没有声明 dsh.bundle,无法作为插件加载——它可能只是普通库或代码仓库,不是 dsh 插件。已作为普通依赖保留,重启也不会生效。' }
+      if (clientOnly && matchedName) {
+        // Client-only surface plugin (theme/UI): register an `insert` row in
+        // cordis.patch.yml so it loads after restart — the same one-shot
+        // install experience as a bundle, no manual YAML editing.
+        const inserted = await this.upsertClientInsert(matchedName)
+        try {
+          if (!(await this.clientInsertNames()).has(matchedName)) throw new Error('insert not persisted')
+        } catch {
+          await this.restoreProfile(dir, snap)
+          return { ok: false, packageName: null, message: '安装成功但自动注册写入校验失败,已回滚。请重试或手动在 cordis.patch.yml 里加 insert 行。' }
+        }
+        await this.saveLastKnownGood()
+        if (taskId) this.setTaskProgress(taskId, 97, '写入完成,收尾中…')
+        return { ok: true, packageName: matchedName, warning: warnings, hotReload: true }
+      }
+      return { ok: false, packageName: matchedName, installedAsDisabled: true, message: '安装完成,但该仓库没有声明 dsh.bundle,无法作为插件加载——它可能只是普通库或代码仓库,不是 dsh 插件。已作为普通依赖保留,重启也不会生效。' }
     }
     if (matched) {
       return { ok: false, packageName: null, message: '安装记录已写入,但未能定位到已安装的包文件。请稍后重试,或检查 profile 的 node_modules。' }
@@ -1971,81 +2396,176 @@ export class ZatMarketGateway extends TypertRemoteService {
       const qText = String(q || '').trim()
       const cat = String(category || '全部')
       const catQuery = CATEGORY_QUERY[cat] || ''
+      // 列表数据变化很慢:磁盘缓存(24h)让重启后同查询零请求;安装/卸载会清缓存,
+      // 版本更新检测走独立的 versions() 通道,不受列表缓存影响。
+      await this.loadListCache()
       const cacheKey = `list:${sortKey}:${pageNum}:${qText}:${cat}`
-      const cached = this.cacheGet(cacheKey) as MarketListResult | null
-      if (cached) return cached
-      let query = 'topic:dsh-plugin'
-      if (catQuery) query += '+' + encodeQueryPart(catQuery)
-      if (qText) query += '+' + encodeQueryPart(qText)
-      const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
-      const r = await this.ghSearch(url)
-      if (r.status !== 200) {
-        const why = r.status === 403 || r.status === 429 ? '搜索太频繁被限流,稍后再试。' : r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'
-        return { ok: false, message: `搜索失败(${r.status})。${why}` }
-      }
-      let json: { items?: unknown[]; total_count?: number } | null = null
-      try {
-        json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
-      } catch {
-        json = null
-      }
-      if (json === null || !Array.isArray(json.items)) return { ok: false, message: 'unexpected GitHub response' }
+      // 先算当前 installedMap(纯本地):缓存命中也要重盖 installed 状态,否则会出现
+      // "装了插件,列表里还显示安装按钮"这种状态不同步。
       let profile: JsonObject | null = null
       try { profile = await this.readProfile() } catch { profile = null }
-      const inst = profile ? this.installedMap(profile) : {}
-      await this.loadZhCache()
-      const items = json.items.map((raw) => {
-        const it = raw as {
-          full_name: string; name: string; description: string | null
-          stargazers_count: number; forks_count: number; language: string | null
-          topics: string[]; updated_at: string; html_url: string; homepage: string | null
-          owner: { login: string } | null
-        }
-        const fullName = it.full_name || ''
-        const cachedZh = this.zhCache.get(fullName.toLowerCase())
-        const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
-        const rec = inst[fullName.toLowerCase()] || inst[String(it.name || '').toLowerCase()]
-        const isHarness = HARNESS_REPOS.includes(fullName.toLowerCase())
-        const kind = this.kindOf(fullName.toLowerCase())
-        return {
-          fullName,
-          owner: it.owner ? it.owner.login : '',
-          name: it.name || '',
-          description: it.description || '',
-          zhIntro: zhIntro || '',
-          needZh: !zhIntro,
-          stars: it.stargazers_count || 0,
-          forks: it.forks_count || 0,
-          language: it.language || '',
-          topics: Array.isArray(it.topics) ? it.topics : [],
-          updatedAt: it.updated_at || '',
-          htmlUrl: it.html_url || '',
-          homepage: it.homepage || '',
-          installed: isHarness || (rec ? rec.enabled : false),
-          installedName: isHarness ? null : (rec ? rec.name : null),
-          installedVersion: isHarness ? this.harnessVersion() : null,
-          isHarness: Boolean(isHarness),
-          disabled: Boolean(rec && !rec.enabled),
-          kind,
-          cover: 'https://opengraph.githubassets.com/1/' + fullName,
-        } satisfies PluginListItem
-      }).filter((item) => item.fullName.toLowerCase() !== SELF_REPO) // hide the market's own card
-      const data: MarketListResult = {
-        ok: true,
-        items,
-        total: json.total_count || 0,
-        hasMore: pageNum * 100 < (json.total_count || 0),
-        page: pageNum,
-        llmUsable: this.checkLlmUsable(),
-        source: this.directDown ? 'mirror' : 'direct',
+      const inst = profile ? await this.installedMap(profile) : {}
+      const cached = this.cacheGet(cacheKey) as MarketListResult | null
+      if (cached) {
+        return Array.isArray(cached.items)
+          ? { ...cached, items: this.restampInstalled(cached.items, inst) }
+          : cached
       }
-      this.cacheSet(cacheKey, data)
-      // Backfill kinds for repos the bundled snapshot does not know yet.
-      void this.startKindScan(items.map((item) => ({ owner: item.owner, name: item.name, fullName: item.fullName })))
-      return data
+      const query = 'topic:dsh-plugin' + (catQuery ? '+' + encodeQueryPart(catQuery) : '') + (qText ? '+' + encodeQueryPart(qText) : '')
+      await this.loadZhCache()
+      // 首次加载(无任何缓存)秒开:内置快照先顶上(零网络,按页返回与真实分页行为一致),
+      // 只有第一页触发后台静默拉真实数据替换缓存。
+      const seed = this.seedList(sortKey, qText, catQuery, inst, pageNum)
+      if (seed) {
+        if (pageNum === 1) void this.refreshListFromGitHub(cacheKey, sortKey, pageNum, qText, cat, catQuery, query, inst)
+        return { ok: true, items: seed.items, total: seed.total, hasMore: pageNum * 100 < seed.total, page: pageNum, llmUsable: this.checkLlmUsable(), source: 'seed' }
+      }
+      return await this.fetchListPage(cacheKey, sortKey, pageNum, qText, cat, catQuery, query, inst)
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
+  }
+
+  /** 从 GitHub 拉一页并构造列表(缓存 miss 与后台刷新共用)。epoch 非空时,期间发生安装/卸载就丢弃结果。 */
+  private async fetchListPage(cacheKey: string, sortKey: string, pageNum: number, qText: string, cat: string, catQuery: string, query: string, inst: InstalledMap, epoch?: number): Promise<MarketListResult> {
+    const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
+    let r = await this.ghSearch(url)
+    // 有搜索词但 topic 精确匹配为空时,回退全文搜(没打 dsh-plugin 标签的仓库也能搜到)。
+    if (r.status === 200 && qText) {
+      try {
+        const j = JSON.parse(r.body) as { items?: unknown[] } | null
+        if (j && Array.isArray(j.items) && j.items.length === 0) {
+          const broad = `https://api.github.com/search/repositories?q=${encodeQueryPart(qText)}+dsh-plugin&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
+          r = await this.ghSearch(broad)
+        }
+      } catch { /* 解析失败按原样 */ }
+    }
+    if (r.status !== 200) {
+      const why = r.status === 403 || r.status === 429 ? '搜索太频繁被限流,稍后再试。' : r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'
+      return { ok: false, message: `搜索失败(${r.status})。${why}` }
+    }
+    let json: { items?: unknown[]; total_count?: number } | null = null
+    try {
+      json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
+    } catch {
+      json = null
+    }
+    if (json === null || !Array.isArray(json.items)) return { ok: false, message: 'unexpected GitHub response' }
+    const items = json.items.map((raw) => this.mapRawItem(raw, inst))
+      .filter((item) => item.fullName.toLowerCase() !== SELF_REPO) // hide the market's own card
+    const data: MarketListResult = {
+      ok: true,
+      items,
+      total: json.total_count || 0,
+      hasMore: pageNum * 100 < (json.total_count || 0),
+      page: pageNum,
+      llmUsable: this.checkLlmUsable(),
+      source: this.directDown ? 'mirror' : 'direct',
+    }
+    // 后台刷新期间用户装了/卸了插件:丢弃,不写缓存,避免旧安装状态回写。
+    if (epoch !== undefined && epoch !== this.cacheEpoch) return data
+    this.cacheSet(cacheKey, data)
+    await this.saveListCache(epoch)
+    // Backfill kinds for repos the bundled snapshot does not know yet.
+    void this.startKindScan(items.map((item) => ({ owner: item.owner, name: item.name, fullName: item.fullName })))
+    return data
+  }
+
+  /** 一条 GitHub 搜索结果 → 列表项(含已装状态/中文简介/类型)。 */
+  private mapRawItem(raw: unknown, inst: InstalledMap): PluginListItem {
+    const it = raw as {
+      full_name: string; name: string; description: string | null
+      stargazers_count: number; forks_count: number; language: string | null
+      topics: string[]; updated_at: string; html_url: string; homepage: string | null
+      owner: { login: string } | null
+    }
+    const fullName = it.full_name || ''
+    const cachedZh = this.zhCache.get(fullName.toLowerCase())
+    const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
+    const rec = inst[fullName.toLowerCase()] || inst[String(it.name || '').toLowerCase()]
+    const isHarness = HARNESS_REPOS.includes(fullName.toLowerCase())
+    const kind = this.kindOf(fullName.toLowerCase())
+    return {
+      fullName,
+      owner: it.owner ? it.owner.login : '',
+      name: it.name || '',
+      description: it.description || '',
+      zhIntro: zhIntro || '',
+      needZh: !zhIntro,
+      stars: it.stargazers_count || 0,
+      forks: it.forks_count || 0,
+      language: it.language || '',
+      topics: Array.isArray(it.topics) ? it.topics : [],
+      updatedAt: it.updated_at || '',
+      htmlUrl: it.html_url || '',
+      homepage: it.homepage || '',
+      installed: isHarness || (rec ? rec.enabled : false),
+      installedName: isHarness ? null : (rec ? rec.name : null),
+      installedVersion: isHarness ? this.harnessVersion() : null,
+      isHarness: Boolean(isHarness),
+      disabled: Boolean(rec && !rec.enabled),
+      kind,
+      cover: 'https://opengraph.githubassets.com/1/' + fullName,
+    } satisfies PluginListItem
+  }
+
+  /** 缓存命中时,用当前 installedMap 重盖每张卡的 installed/installedName/disabled。 */
+  private restampInstalled(items: PluginListItem[], inst: InstalledMap): PluginListItem[] {
+    return items.map((it) => {
+      if (it.isHarness) return it // harness 本体恒为"已安装"
+      const rec = inst[it.fullName.toLowerCase()] || inst[String(it.name || '').toLowerCase()]
+      if (rec) {
+        const installed = rec.enabled
+        const installedName = rec.name
+        const disabled = !rec.enabled
+        if (it.installed === installed && it.installedName === installedName && it.disabled === disabled) return it
+        return { ...it, installed, installedName, disabled }
+      }
+      // 缓存里有"已安装",但现在清单里没了(被卸/手动删了):清掉状态。
+      if (it.installed || it.disabled) return { ...it, installed: false, installedName: null, disabled: false }
+      return it
+    })
+  }
+
+  /** 内置快照按查询过滤+排序,返回可渲染列表(首次加载零网络秒开);匹配不到返回 null。 */
+  /** 内置快照按查询过滤+排序,按页返回(与真实分页行为一致,本地秒翻页);匹配不到返回 null。 */
+  private seedList(sortKey: string, qText: string, catQuery: string, inst: InstalledMap, pageNum: number): { items: PluginListItem[]; total: number } | null {
+    const src = marketSnapshot as unknown as SnapshotEntry[]
+    if (!Array.isArray(src) || src.length === 0) return null
+    const terms: string[] = []
+    if (qText) terms.push(...qText.toLowerCase().split(/\s+/).filter(Boolean))
+    if (catQuery) terms.push(catQuery.toLowerCase())
+    let matched = src
+    if (terms.length > 0) {
+      matched = src.filter((it) => {
+        const hay = (it.n + ' ' + it.d).toLowerCase()
+        return terms.every((t) => hay.includes(t))
+      })
+    }
+    if (matched.length === 0) return null
+    const sorted = [...matched].sort((a, b) => sortKey === 'updated' ? (b.u > a.u ? 1 : -1) : b.s - a.s)
+    const total = sorted.length
+    const slice = sorted.slice((pageNum - 1) * 100, pageNum * 100)
+    if (slice.length === 0) return null
+    const items = slice.map((e) => this.mapRawItem({
+      full_name: e.f, name: e.n, description: e.d, stargazers_count: e.s, forks_count: e.k,
+      language: e.l, topics: e.t, updated_at: e.u, html_url: e.h, homepage: e.p,
+      owner: { login: e.o },
+    }, inst)).filter((item) => item.fullName.toLowerCase() !== SELF_REPO)
+    return items.length > 0 ? { items, total } : null
+  }
+
+  private readonly refreshingList = new Set<string>()
+  /** 快照顶上后,后台静默拉真实数据替换缓存;失败无碍(快照继续用)。 */
+  private async refreshListFromGitHub(cacheKey: string, sortKey: string, pageNum: number, qText: string, cat: string, catQuery: string, query: string, inst: InstalledMap): Promise<void> {
+    if (this.refreshingList.has(cacheKey)) return
+    this.refreshingList.add(cacheKey)
+    const epoch = this.cacheEpoch // 记录开始世代,期间安装/卸载则丢弃结果
+    try {
+      const data = await this.fetchListPage(cacheKey, sortKey, pageNum, qText, cat, catQuery, query, inst, epoch)
+      void data // 结果已进缓存(或已按世代丢弃),客户端下次请求命中
+    } catch { /* 快照顶着 */ }
+    finally { this.refreshingList.delete(cacheKey) }
   }
 
   @Remote('versions')
@@ -2053,7 +2573,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     const map: Record<string, { local: string | null; remote: string | null; hasUpdate: boolean }> = {}
     try {
       const p = await this.readProfile()
-      const inst = this.installedMap(p)
+      const inst = await this.installedMap(p)
       const seen: Record<string, boolean> = {}
       for (const key of Object.keys(inst)) {
         const entry = inst[key]
@@ -2136,7 +2656,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   async installed(): Promise<JsonObject> {
     try {
       const p = await this.readProfile()
-      const inst = this.installedMap(p)
+      const inst = await this.installedMap(p)
       const seen = new Set<string>()
       const entries: Array<{ key: string; name: string; spec: string }> = []
       for (const key of Object.keys(inst)) {
@@ -2423,14 +2943,18 @@ export class ZatMarketGateway extends TypertRemoteService {
                 this.setTaskStep(id, 'download', `正在下载安装 ${only.name || o + '/' + r}…(网络慢时可能较久,请稍候)`)
                 const res = await this.addSpec(o, r, only.dir, id)
                 return res.ok
-                  ? { ok: true, packageName: res.packageName, message: `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
-                  : { ok: false, packageName: null, message: res.message }
+                  ? { ok: true, packageName: res.packageName, message: res.hotReload
+                    ? `已安装 ${only.name || o + '/' + r}(主题/界面插件)— 刷新页面即可生效${res.warning ? '。风险提示:' + res.warning : ''}`
+                    : `已安装 ${only.name || o + '/' + r} — 重启 dsh 生效${res.warning ? '。风险提示:' + res.warning : ''}` }
+                  : { ok: false, packageName: res.packageName, installedAsDisabled: res.installedAsDisabled === true, message: res.message }
               }, { owner: o, repo: r })
               return { ok: true, taskId }
             }
             return { ok: false, kind: 'multi', packages: sub.packages, message: '这个插件包含多个部分,请选择要安装的:' }
           }
-          return { ok: false, message: '这个仓库不是可安装的 dsh 插件:里面没有找到插件声明(dsh.bundle)。它可能是一个技能包、工具库或代码仓库(只是打了 dsh-plugin 标签),无法通过市场一键安装。请到该仓库的 GitHub 页面查看它的使用方式。' }
+          // 没有插件声明,但可能是技能(skill)包:clone 后扫描 SKILL.md,技能也一键装。
+          const taskId = this.launchTask((id) => this.installSkillsTask(o, r, id), { owner: o, repo: r })
+          return { ok: true, taskId }
         }
       }
       const taskId = this.launchTask(async (id) => {
@@ -2449,8 +2973,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         this.setTaskStep(id, 'download', '正在下载安装包…(网络慢时可能较久,请稍候)')
         const res = await this.addSpec(o, r, s || undefined, id, analysis)
         return res.ok
-          ? { ok: true, packageName: res.packageName, message: `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
-          : { ok: false, packageName: null, message: res.message }
+          ? { ok: true, packageName: res.packageName, message: res.hotReload
+            ? `已安装(主题/界面插件)— 刷新页面即可生效。${res.warning ? '。风险提示:' + res.warning : ''}`
+            : `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
+          : { ok: false, packageName: res.packageName, installedAsDisabled: res.installedAsDisabled === true, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
     } catch (err) {
@@ -2481,7 +3007,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         const version = await this.remoteVersion(o, r, s || undefined)
         return res.ok
           ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
-          : { ok: false, message: res.message }
+          : { ok: false, packageName: res.packageName, installedAsDisabled: res.installedAsDisabled === true, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
     } catch (err) {
@@ -2519,6 +3045,21 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (n === 'zat-dsh-engine') {
       return { ok: false, message: '市场不能卸载自己,已阻止。如需移除,请用官方命令: dsh plugin --profile <你的profile> remove zat-dsh-engine' }
     }
+    // 技能(skill)卸载:按 owner/repo 从技能清单里删目录,立即生效。
+    const skillManifest = await this.readSkillManifest()
+    const skillEntry = skillManifest[n.toLowerCase()]
+    if (skillEntry && skillEntry.dirs.length > 0) {
+      const skillsDir = await this.getSkillsDir()
+      const removed: string[] = []
+      for (const d of skillEntry.dirs) {
+        const p = join(skillsDir, d)
+        if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); removed.push(d) }
+      }
+      delete skillManifest[n.toLowerCase()]
+      await this.writeSkillManifest(skillManifest)
+      this.invalidateListCache()
+      return { ok: true, message: `已卸载技能 ${removed.join('、') || name} — 立即生效` }
+    }
     const taskId = this.launchTask(async (id) => {
       try {
         this.setTaskStep(id, 'uninstall', `正在卸载 ${n}…`)
@@ -2545,6 +3086,8 @@ export class ZatMarketGateway extends TypertRemoteService {
           ;((after.dsh as JsonObject).profile as JsonObject).bundles = bundles
           await this.writeProfile(after)
         }
+        // Client-only surface plugins live as an `insert` row, not a bundle entry.
+        await this.removeClientInsert(n)
         await this.saveLastKnownGood()
         this.setTaskProgress(id, 97, '清理完成,收尾中…')
         return { ok: true, message: `已卸载 ${n} — 重启 dsh 后不再加载` }
@@ -2726,8 +3269,8 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       await this.loadZhCache()
       const p = await this.readProfile()
-      const inst = this.installedMap(p)
-      const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean; installing?: boolean; taskId?: string }> = []
+      const inst = await this.installedMap(p)
+      const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean; installing?: boolean; taskId?: string; spec?: string; stars?: number }> = []
       const noRepo: Array<{ name: string; enabled: boolean }> = []
       const seen = new Set<string>()
       for (const rec of new Set(Object.values(inst))) {
@@ -2739,7 +3282,9 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
         if (!owner || !repo) {
           // 纯 npm / link 安装:没有 GitHub 仓库地址,也要在"已安装"里看到和管理。
-          if (rec.name.startsWith('@deepseek-ai/')) continue // 官方组件不在这里列
+          // 注意:dependencies 里出现的 @deepseek-ai/* 都是用户/AI 装的第三方(借了官方
+          // scope 的,比如 @deepseek-ai/dsh-client-ui-aqua),官方组件在 bundles 里、不在
+          // dependencies 里 —— 所以这里不能再按前缀跳过,否则借 scope 的插件就"消失"了。
           const bare = rec.name.replace(/^@[\w.-]+\//, '')
           if (seen.has('npm:' + bare.toLowerCase())) continue
           seen.add('npm:' + bare.toLowerCase())
@@ -2750,7 +3295,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (key === SELF_REPO) continue // the market's own card stays hidden
         if (seen.has(key)) continue
         seen.add(key)
-        unique.push({ name: rec.name, owner, repo, enabled: rec.enabled })
+        unique.push({ name: rec.name, owner, repo, enabled: rec.enabled, spec: rec.spec, stars: rec.stars })
       }
       // Installations currently in flight also belong in the installed view:
       // their card shows the live progress and the state survives leaving the
@@ -2791,53 +3336,41 @@ export class ZatMarketGateway extends TypertRemoteService {
           cover: '',
         })
       }
-      let next = 0
-      const worker = async (): Promise<void> => {
-        while (next < unique.length) {
-          const rec = unique[next++]!
-          const fullName = rec.owner + '/' + rec.repo
-          // Local truth first: the card must NEVER vanish because an API
-          // call failed or the rate limit kicked in. Enrich when possible.
-          let enriched: { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null } | null = null
-          const repoRes = await this.ghGet(`https://api.github.com/repos/${fullName}`)
-          if (repoRes.status === 200) {
-            try { enriched = JSON.parse(repoRes.body) as typeof enriched } catch { enriched = null }
-          }
-          try {
-            const it: { name?: string; description?: string | null; stargazers_count?: number; forks_count?: number; language?: string | null; topics?: string[]; updated_at?: string; html_url?: string; homepage?: string | null } = enriched || {}
-            const cachedZh = this.zhCache.get(fullName.toLowerCase())
-            const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
-            const item: JsonObject = {
-              fullName,
-              owner: rec.owner,
-              name: it.name || rec.repo,
-              description: it.description || '',
-              zhIntro: zhIntro || '',
-              needZh: !zhIntro,
-              stars: it.stargazers_count || 0,
-              forks: it.forks_count || 0,
-              language: it.language || '',
-              topics: Array.isArray(it.topics) ? it.topics : [],
-              updatedAt: it.updated_at || '',
-              htmlUrl: it.html_url || `https://github.com/${fullName}`,
-              homepage: it.homepage || '',
-              installed: rec.enabled,
-              installedName: rec.name,
-              installedVersion: null,
-              isHarness: Boolean(HARNESS_REPOS.includes(fullName.toLowerCase())),
-              disabled: Boolean(!rec.enabled),
-              kind: this.kindOf(fullName.toLowerCase()),
-              cover: 'https://opengraph.githubassets.com/1/' + fullName,
-            }
-            if (rec.installing) item.installing = true
-            if (rec.taskId) item.taskId = rec.taskId
-            items.push(item)
-          } catch { /* skip unreadable repo json */ }
+      // 已安装是"确定的东西",必须本地秒出,绝不联网:描述/星数从内置快照和 zh
+      // 缓存取,取不到就留空,不再逐仓请求 GitHub(那样 VPN/代理一断就卡死)。
+      const snapById = new Map<string, SnapshotEntry>()
+      for (const e of marketSnapshot as unknown as SnapshotEntry[]) snapById.set(String(e.f || '').toLowerCase(), e)
+      for (const rec of unique) {
+        const fullName = rec.owner + '/' + rec.repo
+        const snap = snapById.get(fullName.toLowerCase())
+        const cachedZh = this.zhCache.get(fullName.toLowerCase())
+        const zhIntro = (cachedZh && Date.now() - cachedZh.at < ZH_TTL) ? cachedZh.zh : ''
+        const item: JsonObject = {
+          fullName,
+          owner: rec.owner,
+          name: snap?.n || rec.repo,
+          description: snap?.d || '',
+          zhIntro: zhIntro || '',
+          needZh: !zhIntro,
+          stars: snap?.s || rec.stars || 0,
+          forks: snap?.k || 0,
+          language: snap?.l || '',
+          topics: snap?.t || [],
+          updatedAt: snap?.u || '',
+          htmlUrl: snap?.h || `https://github.com/${fullName}`,
+          homepage: snap?.p || '',
+          installed: rec.enabled,
+          installedName: rec.name,
+          installedVersion: null,
+          isHarness: Boolean(HARNESS_REPOS.includes(fullName.toLowerCase())),
+          disabled: Boolean(!rec.enabled),
+          kind: rec.spec && String(rec.spec).startsWith('skill:') ? 'skill' : this.kindOf(fullName.toLowerCase()),
+          cover: 'https://opengraph.githubassets.com/1/' + fullName,
         }
+        if (rec.installing) item.installing = true
+        if (rec.taskId) item.taskId = rec.taskId
+        items.push(item)
       }
-      const workers: Promise<void>[] = []
-      for (let w = 0; w < 3; w++) workers.push(worker())
-      await Promise.all(workers)
       return { ok: true, items, total: items.length, hasMore: false, page: 1 }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
@@ -2855,8 +3388,28 @@ export class ZatMarketGateway extends TypertRemoteService {
       const p = await this.readProfile()
       const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
       const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
+      // Client-only surface plugin (theme/UI): toggle its `insert` row instead
+      // of a bundle entry — pushing it into bundles would break dsh startup.
+      if (await this.isClientOnlyPackage(n)) {
+        if (enabled) {
+          const names = await this.clientInsertNames()
+          if (names.has(n)) return { ok: true, enabled: true, message: `${n} 已经在启用` }
+          await this.upsertClientInsert(n)
+          if (!(await this.clientInsertNames()).has(n)) return { ok: false, message: '启用写入校验失败,请重试' }
+          await this.saveLastKnownGood()
+          return { ok: true, enabled: true, message: `${n} 已启用 — 重启 dsh 后生效` }
+        }
+        const removed = await this.removeClientInsert(n)
+        await this.saveLastKnownGood()
+        return removed
+          ? { ok: true, enabled: false, message: `${n} 已停用 — 重启 dsh 后生效` }
+          : { ok: true, enabled: false, message: `${n} 本来就没启用` }
+      }
       if (enabled) {
         if (bundles.includes(n)) return { ok: true, enabled: true, message: `${n} 已经在启用列表中` }
+        if (!(await this.isBundlePackage(n))) {
+          return { ok: false, message: `${n} 没有声明 dsh.bundle,也不是 client-only 插件,市场不能自动启用。请按它的 README 手动注册。` }
+        }
         bundles.push(n)
       } else {
         if (!bundles.includes(n)) return { ok: true, enabled: false, message: `${n} 本来就不在启用列表中` }
@@ -2933,8 +3486,9 @@ export class ZatMarketGateway extends TypertRemoteService {
       // 网络:连不上 GitHub,装/更新插件就都干不了。
       const netProbe = await this.ghGet('https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/HEAD/package.json')
       if (netProbe.status === 0) issues.push({ level: 'error', title: '连不上 GitHub', detail: '装/更新插件拉不到代码。解决:开 VPN/系统代理,或确认网络后再试。' })
-      interface Scanned { name: string; enabled: boolean; meta: { main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
+      interface Scanned { name: string; enabled: boolean; meta: { main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string }; client?: unknown } }; patchIds: Set<string> }
       const scanned: Scanned[] = []
+      const clientInserts = await this.clientInsertNames()
       for (const name of deps) {
         try {
           const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as Scanned['meta']
@@ -2942,10 +3496,13 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (meta.dsh?.bundle?.patch) {
             try { patchIds = extractPatchIds(readFileSync(join(dir, 'node_modules', name, meta.dsh.bundle.patch), 'utf8')) } catch { /* no patch file */ }
           }
-          const enabled = bundles.includes(name) || name.startsWith('@deepseek-ai/')
+          const enabled = bundles.includes(name) || name.startsWith('@deepseek-ai/') || clientInserts.has(name)
           scanned.push({ name, enabled, meta, patchIds })
+          if (bundles.includes(name) && !meta.dsh?.bundle?.patch) {
+            issues.push({ level: 'error', title: `${name} 在启用名单里但没有声明 dsh.bundle`, detail: 'dsh 启动时读到这种条目会直接报错拒绝启动。解决:点「一键修复」自动把它移出启用名单(依赖保留),再按它的 README 在 cordis.patch.yml 里手动注册。', fixable: true })
+          }
           for (const d of Object.keys(meta.dependencies || {})) {
-            if (d.startsWith('@deepseek-ai/')) issues.push({ level: 'error', title: `${name} 把官方包 ${d} 写进了 dependencies`, detail: '官方包应使用 peerDependencies 引用;直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。建议反馈给插件作者。' })
+            if (isHostCorePackage(d)) issues.push({ level: 'error', title: `${name} 把官方核心包 ${d} 写进了 dependencies`, detail: '官方核心包应使用 peerDependencies 引用;直接依赖会装出第二份拷贝并劫持官方 loader 行,可能让 dsh 起不来。建议反馈给插件作者。' })
           }
           for (const pd of Object.keys(meta.peerDependencies || {})) {
             if (meta.peerDependenciesMeta?.[pd]?.optional) continue // declared optional — not missing
@@ -2969,7 +3526,12 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (!fieldSupports(meta.os, process.platform)) issues.push({ level: 'error', title: `${name} 不支持当前系统(仅支持 ${(meta.os || []).join('、')})`, detail: `它不支持你当前的系统(${process.platform}),装了会导致 dsh 起不来。解决:卸载它。` })
           if (!fieldSupports(meta.cpu, process.arch)) issues.push({ level: 'error', title: `${name} 不支持当前 CPU(仅支持 ${(meta.cpu || []).join('、')})`, detail: '解决:卸载它。' })
           if (!enabled && !name.startsWith('@deepseek-ai/')) {
-            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单。解决:点「一键修复」自动启用。', fixable: true })
+            const isEnableable = Boolean(meta.dsh?.bundle?.patch) || Boolean(meta.dsh?.client)
+            if (isEnableable) {
+              issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但未启用。解决:点「一键修复」自动启用。', fixable: true })
+            } else {
+              issues.push({ level: 'info', title: `${name} 已安装但不会被加载`, detail: '它既没有 dsh.bundle 也没有 dsh.client,不是可加载的 dsh 插件(可能只是普通库)。已作为依赖保留。' })
+            }
           }
         } catch {
           issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。解决:点「一键修复」自动补装。', fixable: true })
@@ -3046,9 +3608,11 @@ export class ZatMarketGateway extends TypertRemoteService {
       // Security scan of every ENABLED third-party plugin's actual installed
       // code (host + client). Official @deepseek-ai/* packages are skipped:
       // they ship with the harness and the user cannot uninstall them.
+      // 市场自己也跳过:它打包了市场快照数据(第三方仓库的 homepage 域名等),
+      // 那些字符串是数据不是代码行为,扫了会误报"可疑网络去向"。
       // 这里只是"提示"——真正的拦截在搜插件(装前体检)和安装门那一步;已装的只提醒,不逼着停用。
       for (const s of scanned) {
-        if (!s.enabled || s.name.startsWith('@deepseek-ai/')) continue
+        if (!s.enabled || s.name.startsWith('@deepseek-ai/') || s.name === 'zat-dsh-engine') continue
         const texts = await this.readLocalTexts(s.name)
         for (const f of scanSecurity(texts.hostText, `${s.name} 宿主代码`)) {
           issues.push({ level: 'warn', title: f.title, detail: f.detail })
@@ -3058,7 +3622,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
       // Multiple market/manager plugins.
-      const inst = this.installedMap(p)
+      const inst = await this.installedMap(p)
       const markets: string[] = []
       for (const rec of new Set(Object.values(inst))) {
         if (KNOWN_MARKET_REPOS[(rec.owner + '/' + rec.repo).toLowerCase()] !== undefined || Object.values(KNOWN_MARKET_REPOS).includes(rec.name) || isMarketishName(rec.name) || await this.scanLocalMarketish(rec.name)) {
@@ -3091,7 +3655,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const p = await this.readProfile()
       const deps = Object.keys((p.dependencies || {}) as Record<string, string>)
       const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
-      const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
+      let bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
       // 0) 没 pnpm 就先装:corepack enable 优先(快、不联网),不行再 npm i -g pnpm。
       if (!(await this.pnpmAvailable())) {
         let installed = false
@@ -3102,11 +3666,37 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (installed && await this.pnpmAvailable()) fixed.push('已装好 pnpm')
         else remaining.push('没装 pnpm,本机也装不了(corepack/npm 都没有);请先装 Node.js 再点一次。')
       }
-      // 1) 装了但没启用的第三方插件 → 启用。
+      // 0.5) 清掉"没有 dsh.bundle 却被塞进启用名单"的条目 —— 这会让 dsh 下次启动直接崩。
+      const badBundles: string[] = []
+      for (const b of bundles) {
+        if (b.startsWith('@deepseek-ai/')) continue
+        if (!(await this.isBundlePackage(b))) badBundles.push(b)
+      }
+      if (badBundles.length > 0) {
+        const snap = await this.snapshotProfile(dir)
+        const cleaned = bundles.filter((b) => !badBundles.includes(b))
+        p.dsh = p.dsh || {}
+        ;(p.dsh as JsonObject).profile = (p.dsh as JsonObject).profile || {}
+        ;((p.dsh as JsonObject).profile as JsonObject).bundles = cleaned
+        await this.writeProfile(p)
+        try {
+          const check = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
+          const checkBundles = ((check.dsh as JsonObject | undefined)?.profile as JsonObject | undefined)?.bundles
+          if (!Array.isArray(checkBundles) || badBundles.some((b) => checkBundles.includes(b))) throw new Error('cleanup not persisted')
+          bundles = cleaned
+          fixed.push(`已把 ${badBundles.join('、')} 移出启用名单(没有 dsh.bundle,留着会导致 dsh 起不来)`)
+        } catch {
+          await this.restoreProfile(dir, snap)
+          remaining.push('清理无效启用条目失败,已还原;请手动编辑 profile 的 dsh.profile.bundles 删掉这些名字。')
+        }
+      }
+      // 1) 装了但没启用的第三方 bundle 插件 → 启用(client-only 插件跳过,市场不自动塞)。
       const toEnable: string[] = []
       for (const name of deps) {
         if (name.startsWith('@deepseek-ai/')) continue
-        if (!bundles.includes(name)) toEnable.push(name)
+        if (bundles.includes(name)) continue
+        if (!(await this.isBundlePackage(name))) continue
+        toEnable.push(name)
       }
       if (toEnable.length > 0) {
         const snap = await this.snapshotProfile(dir)
@@ -3123,6 +3713,21 @@ export class ZatMarketGateway extends TypertRemoteService {
           await this.restoreProfile(dir, snap)
           remaining.push('启用插件失败,已还原;请重启 dsh 后重试。')
         }
+      }
+      // 1.5) client-only 插件(主题/UI)没注册 insert → 自动注册,重启即生效。
+      const clientNames = await this.clientInsertNames()
+      const clientToInsert: string[] = []
+      for (const name of deps) {
+        // 注意:不能按 `@deepseek-ai/` 前缀跳过 —— 有些第三方主题(如 Aqua)故意
+        // 借官方 scope 命名,跳过会让"一键修复"漏掉它们。isClientOnlyPackage
+        // 已经只对真正的 client-only 插件放行。
+        if (bundles.includes(name)) continue
+        if (clientNames.has(name)) continue
+        if (await this.isClientOnlyPackage(name)) clientToInsert.push(name)
+      }
+      for (const name of clientToInsert) {
+        await this.upsertClientInsert(name)
+        fixed.push(`已注册 ${name}(主题/界面插件,自动写入 cordis.patch.yml)`)
       }
       // 2) 缺失的 peer 依赖 / 缺包文件 → pnpm install 一次补全。
       const missingPeers = new Set<string>()
@@ -3174,12 +3779,12 @@ export class ZatMarketGateway extends TypertRemoteService {
    * into a log line.
    */
   private async ghApi(method: string, path: string, token?: string): Promise<{ status: number; body: string; error?: string }> {
-    const proxy = await this.loadProxy()
+    const proxy = this.proxyDown ? null : await this.loadProxy()
     const proxyArgs = proxy ? ['--proxy', proxy] : []
     let curl = 'curl'
     try { curl = await this.subprocess.resolveExecutable('curl') } catch { curl = '' }
     if (!curl) return { status: 0, body: '', error: 'curl not available' }
-    const argv = [curl, ...proxyArgs, '-s', '-L', '--max-time', '30', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.3.1', '-H', 'Accept: application/vnd.github+json', '-X', method]
+    const argv = [curl, ...proxyArgs, '-s', '-L', '--max-time', '5', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.3.1', '-H', 'Accept: application/vnd.github+json', '-X', method]
     if (token) argv.push('-H', `Authorization: Bearer ${token}`)
     argv.push('https://api.github.com' + path)
     const handle = this.subprocess.spawn({
@@ -3196,9 +3801,10 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (outcome.exitCode === 0) {
       const lines = String(stdout).trimEnd().split('\n')
       const status = Number(lines.pop())
-      if (Number.isFinite(status) && status > 0) return { status, body: lines.join('\n') }
+      if (Number.isFinite(status) && status > 0) { if (status === 0) this.proxyDown = true; return { status, body: lines.join('\n') } }
       return { status: 200, body: lines.join('\n') }
     }
+    this.proxyDown = true
     if (stderr.trim()) return { status: 0, body: '', error: stderr.trim().slice(0, 200) }
     return { status: 0, body: '', error: 'curl failed' }
   }

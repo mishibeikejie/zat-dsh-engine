@@ -254,7 +254,7 @@ const css = `
 .zat-btn.zat-installed{background:var(--color-bg3,#1d2b21);color:#34d399;border:1px solid rgba(52,211,153,.35)}
 .zat-btn:disabled{opacity:.55;cursor:default}
 .zat-sel{background:var(--color-bg2,#181d28);color:var(--color-fg2,#dbe2ee);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:5px 8px;font-size:12.5px;outline:none;max-width:200px}
-.zat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:12px;overflow-y:auto;min-height:0;padding:2px}
+.zat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:12px;overflow-y:auto;min-height:0;flex:1;padding:2px}
 .zat-card{background:var(--color-bg2,#151a24);border:1px solid var(--zat-edge);border-radius:12px;overflow:hidden;cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s;display:flex;flex-direction:column}
 .zat-card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.4);border-color:rgba(93,140,255,.4)}
 .zat-cover{position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#1c2333,#26304a);overflow:hidden}
@@ -265,6 +265,7 @@ const css = `
 .zat-kind-skill{background:rgba(217,119,6,.92);color:#fff}
 .zat-kind-nonplugin{background:rgba(90,100,120,.92);color:#fff}
 .zat-kind-multi{background:rgba(79,70,229,.92);color:#fff}
+.zat-kind-client{background:rgba(139,92,246,.92);color:#fff}
 .zat-updbadge{position:absolute;top:8px;right:8px;background:rgba(14,165,233,.95);color:#fff;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.4)}
 .zat-zhbadge{position:absolute;bottom:6px;left:8px;background:rgba(20,30,60,.85);color:#9fc1ff;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid rgba(93,140,255,.3)}
 .zat-body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px;flex:1}
@@ -412,7 +413,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState('stars')
   const [category, setCategory] = useState('全部')
-  const [instFilter, setInstFilter] = useState<'all' | 'installed' | 'uninstalled' | 'installable'>('all')
+  const [instFilter, setInstFilter] = useState<'all' | 'installed' | 'uninstalled' | 'installable' | 'updatable'>('all')
   const [installedMode, setInstalledMode] = useState(false)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -420,6 +421,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [installing, setInstalling] = useState('')
   const [detail, setDetail] = useState<MarketItem | null>(null)
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
+  const [detailFailed, setDetailFailed] = useState(false)
   const [notice, setNotice] = useState('')
   const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[] } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
@@ -436,6 +438,13 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const loadingRef = useRef(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const starredSetRef = useRef<Set<string> | null>(null)
+  // 查询换代令牌:切分类/搜索词时 +1,让后台自动翻页的旧结果作废。
+  const loadTokenRef = useRef(0)
+  // 快照→真实数据自动过渡的重试计数(上限 3 次,防网络差时反复打 GitHub)。
+  const seedRetryRef = useRef(0)
+  // 列表滚动位置:进详情前记录,返回时恢复,避免每次回到顶部。
+  const listElRef = useRef<HTMLDivElement | null>(null)
+  const listScrollRef = useRef(0)
 
   const t = (zhText: string, enText: string): string => (zh ? zhText : enText)
 
@@ -521,7 +530,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   // Notices auto-fade so a stale message never sticks to the panel.
   useEffect(() => {
     if (!notice) return
-    const timer = setTimeout(() => setNotice(''), 5500)
+    const timer = setTimeout(() => setNotice(''), 9000)
     return () => clearTimeout(timer)
   }, [notice])
 
@@ -530,16 +539,28 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     return dispose
   }, [])
 
-  function load(p: number, s: string, q: string, cat: string, append: boolean): void {
-    if (loadingRef.current) return
-    loadingRef.current = true
-    setLoading(true)
-    setError('')
-    void pm.list(p, s, q, cat).then((res) => {
-      loadingRef.current = false
-      setLoading(false)
+  function load(p: number, s: string, q: string, cat: string, append: boolean, background = false): void {
+    const token = loadTokenRef.current
+    if (!background) {
+      loadingRef.current = true
+      setLoading(true)
+      setError('')
+    }
+    // 超时保护:宿主或网络再慢也不能让面板永远转圈。请求返回后清理定时器。
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const listTimeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(t('加载超时,请重试(网络慢)', 'Load timed out — retry (slow network)'))), 25000)
+    })
+    void Promise.race([pm.list(p, s, q, cat), listTimeout]).then((res) => {
+      if (timer) clearTimeout(timer)
+      // 过期结果(查询已换代)直接丢弃,不碰 loading/items——最新查询自己接管。
+      if (token !== loadTokenRef.current) return
+      if (!background) {
+        loadingRef.current = false
+        setLoading(false)
+      }
       if (!res.ok || !res.value.ok) {
-        setError(res.ok ? String(res.value.message || '') : res.error.message)
+        if (!background) setError(res.ok ? String(res.value.message || '') : res.error.message)
         return
       }
       const data = res.value
@@ -554,18 +575,49 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       })
       setTotal(data.total || 0)
       setPage(p)
-      requestZh(data.items)
-      requestVersions(data.items)
-      requestOs(data.items)
+      // 中文简介/版本检测延迟 1.5s 再发:让首屏和用户点击先跑,别用一堆慢 RPC 把队列堵死。
+      // (osMap 已删:一次 100 个网络请求,是"已安装"被卡 7 秒的主因)
+      const t = token
+      setTimeout(() => {
+        if (t !== loadTokenRef.current) return
+        requestZh(data.items)
+        requestVersions(data.items)
+      }, 1500)
+      // 真实数据(非快照)到达时,重置快照重试计数。
+      if (data.source !== 'seed') seedRetryRef.current = 0
+      // 后台自动翻页:第一页出现后,剩余页无感拉全(不点按钮、不占首屏)。
+      // 定时器回调里再核对 token:期间切换了查询就不发旧查询的请求。
+      if (data.hasMore && p < 10 && token === loadTokenRef.current) {
+        const t = token
+        setTimeout(() => { if (t === loadTokenRef.current) load(p + 1, s, q, cat, true, true) }, 120)
+      }
+      // 快照秒开后的自动过渡(只对第一页):等后台刷新完成,8 秒后把真实数据**合并**进来
+      // (append 去重,不缩水;新增仓库出现,被删仓库等下次切换/重进自然清理)。最多重试
+      // 3 次,之后保持快照等用户手动刷新,避免网络差时每 8 秒反复打 GitHub。
+      if (data.source === 'seed' && p === 1 && token === loadTokenRef.current) {
+        const attempts = seedRetryRef.current + 1
+        seedRetryRef.current = attempts
+        if (attempts <= 3) {
+          const t = token
+          setTimeout(() => { if (t === loadTokenRef.current) load(p, s, q, cat, true, true) }, 8000)
+        }
+      }
     }).catch((err: unknown) => {
-      loadingRef.current = false
-      setLoading(false)
-      setError(String((err as { message?: string })?.message || err))
+      if (timer) clearTimeout(timer)
+      if (token !== loadTokenRef.current) return
+      if (!background) {
+        loadingRef.current = false
+        setLoading(false)
+        setError(String((err as { message?: string })?.message || err))
+      }
     })
   }
 
   /** The installed filter: every installed plugin in one shot, no paging. */
   function loadInstalled(): void {
+    // 让还在飞的 load(全部/分类) 失效:否则它的响应回来会把"已安装"视图整个覆盖掉。
+    loadTokenRef.current++
+    seedRetryRef.current = 0
     setLoading(true)
     setError('')
     void pm.installedList().then((res) => {
@@ -579,9 +631,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setTotal(data.total || 0)
       setPage(1)
       setInstalledMode(true)
-      requestZh(data.items)
-      requestVersions(data.items)
-      requestOs(data.items)
+      // 延迟再发 zh/版本检测,别和"已安装"主流程抢 RPC 队列。
+      setTimeout(() => {
+        requestZh(data.items)
+        requestVersions(data.items)
+      }, 1500)
       // Resume watching any in-flight installs so their cards show progress
       // even after leaving the settings page and coming back.
       for (const it of data.items) {
@@ -595,7 +649,8 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
 
   function requestZh(list: MarketItem[]): void {
     if (!zh) return
-    const needZh = list.filter((it) => it.needZh).map((it) => ({ fullName: it.fullName, description: it.description || '' }))
+    // 全量列表可能有上千条,单次最多翻译前 100 个未缓存的,避免 LLM 风暴;缓存会留存,下次自动补。
+    const needZh = list.filter((it) => it.needZh).slice(0, 100).map((it) => ({ fullName: it.fullName, description: it.description || '' }))
     if (!needZh.length) return
     void pm.translate(needZh).then((tr) => {
       if (tr.ok && tr.value.ok && tr.value.map) {
@@ -607,33 +662,22 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   function requestVersions(list: MarketItem[]): void {
     const installed = list.filter((it) => it.installed)
     if (!installed.length) return
-    void pm.versions().then((vr) => {
-      if (vr.ok && vr.value.ok && vr.value.map) {
-        setItems((prev) => prev ? prev.map((it) => {
-          const entry = vr.value.map[it.fullName.toLowerCase()]
-          if (!entry) return it
-          return {
-            ...it,
-            installedVersion: entry.local,
-            latestVersion: entry.remote,
-            hasUpdate: entry.hasUpdate,
-          }
-        }) : prev)
-      }
-    }).catch(() => { /* best effort */ })
+    refreshVersions()
   }
 
-  /** 批量解析卡片上的"支持系统"标签(新插件也会自动补齐)。 */
-  function requestOs(list: MarketItem[]): void {
-    const names = list.filter((it) => it.os === undefined && !it.noRepo).map((it) => it.fullName)
-    if (!names.length) return
-    void pm.osMap(names).then((res) => {
-      if (!res.ok || !res.value.ok || !res.value.map) return
-      const map = res.value.map
+  /** 重查所有已装插件版本,刷新每张卡片的 hasUpdate(安装/更新后"待更新"筛选要实时)。 */
+  function refreshVersions(): void {
+    void pm.versions().then((vr) => {
+      if (!vr.ok || !vr.value.ok || !vr.value.map) return
       setItems((prev) => prev ? prev.map((it) => {
-        const hit = map[it.fullName.toLowerCase()]
-        if (hit && it.os === undefined) return { ...it, os: hit.os ?? [] }
-        return it
+        const entry = vr.value.map[it.fullName.toLowerCase()]
+        if (!entry) return it
+        return {
+          ...it,
+          installedVersion: entry.local,
+          latestVersion: entry.remote,
+          hasUpdate: entry.hasUpdate,
+        }
       }) : prev)
     }).catch(() => { /* best effort */ })
   }
@@ -649,12 +693,16 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || '') })
       }
     }).catch(() => { /* best effort */ })
-    syncStars()
+    // 星标同步延迟 2s:它走网络(ghApi),别在刚进页面时和列表加载抢队列。
+    const starTimer = setTimeout(() => { syncStars() }, 2000)
+    return () => clearTimeout(starTimer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Debounced live search: typing pauses 300 ms, clearing returns to default.
   useEffect(() => {
+    loadTokenRef.current++ // 查询换代:作废还没回来的旧页
+    seedRetryRef.current = 0 // 新查询重新给快照过渡机会
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       load(1, sort, query, category, false)
@@ -691,8 +739,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           if (result.ok) {
             setNotice(String(result.message || t('✅ 完成!', '✅ Done!')))
             refreshItem(fullName, { installed: true, disabled: false, installing: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+            refreshVersions()
+          } else if (result.installedAsDisabled === true) {
+            setNotice(String(result.message || t('已安装,但未启用', 'Installed but not enabled')))
+            refreshItem(fullName, { installed: false, disabled: true, installing: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
           } else {
-            setNotice(String(result.message || t('安装失败', 'Install failed')))
+            setNotice('❌ ' + String(result.message || t('安装失败', 'Install failed')))
             refreshItem(fullName, { installing: false })
           }
           return
@@ -762,8 +814,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           if (result && result.ok) {
             setNotice(String(result.message || t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.')))
             refreshItem(item.fullName, { installed: true, disabled: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+            refreshVersions()
+          } else if (result && result.installedAsDisabled === true) {
+            setNotice(String(result.message || t('已安装,但未启用', 'Installed but not enabled')))
+            refreshItem(item.fullName, { installed: false, disabled: true, installing: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
           } else {
-            setNotice(String((result && result.message) || t('安装失败', 'Install failed')))
+            setNotice('❌ ' + String((result && result.message) || t('安装失败', 'Install failed')))
           }
         })
         return
@@ -793,8 +849,13 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             setSubChoices(null)
             setNotice(String(result.message || t('✅ 已安装!重启 dsh 后生效。', '✅ Installed! Restart dsh to activate.')))
             refreshItem(choice.owner + '/' + choice.repo, { installed: true, disabled: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
+            refreshVersions()
+          } else if (result && result.installedAsDisabled === true) {
+            setSubChoices(null)
+            setNotice(String(result.message || t('已安装,但未启用', 'Installed but not enabled')))
+            refreshItem(choice.owner + '/' + choice.repo, { installed: false, disabled: true, installing: false, installedName: (result.packageName as string | null) || null, hasUpdate: false })
           } else {
-            setNotice(String((result && result.message) || t('安装失败', 'Install failed')))
+            setNotice('❌ ' + String((result && result.message) || t('安装失败', 'Install failed')))
           }
         })
         return
@@ -839,6 +900,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           if (result && result.ok) {
             setNotice(String(result.message || t('✅ 已更新!重启 dsh 后生效。', '✅ Updated! Restart dsh to activate.')))
             refreshItem(item.fullName, { hasUpdate: false, installedVersion: (result.version as string | null) || null, latestVersion: (result.version as string | null) || null })
+            refreshVersions()
           } else {
             setNotice(String((result && result.message) || t('更新失败', 'Update failed')))
           }
@@ -939,48 +1001,74 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   function cardAction(item: MarketItem): void {
     if (item.isHarness) { setDetail(item); return }
     if (item.disabled) { doSetEnabled(item, true); return }
-    if (item.kind === 'skill' || item.kind === 'nonplugin') { setDetail(item); return }
+    if (item.kind === 'nonplugin') { setDetail(item); return }
     if (item.installed && item.hasUpdate) doUpdate(item)
     else if (!item.installed) doInstall(item)
     else setDetail(item)
   }
 
   function openDetail(item: MarketItem): void {
+    // 记住真正在滚的那个容器(DSH 设置页是 .options 在滚,不是我们的 grid)的滚动位置。
+    const scroller = findScroller(listElRef.current)
+    if (scroller) listScrollRef.current = scroller.scrollTop
     setDetail(item)
     setDetailData(null)
+    setDetailFailed(false)
     if (item.noRepo) return // npm/link install: no repo to fetch details from
+    let done = false
+    const finish = (): void => { done = true }
+    // README 详情也要有超时:网络断了 10 秒内给结果,不再"一直加载"。
+    const timer = setTimeout(() => { if (!done) { setDetailFailed(true) } }, 10000)
     void pm.detail(item.owner, item.name).then((res) => {
-      if (!res.ok || !res.value.ok) { setDetailData(null); return }
+      if (done) return
+      finish(); clearTimeout(timer)
+      if (!res.ok || !res.value.ok) { setDetailFailed(true); return }
       setDetailData(res.value)
-    }).catch(() => setDetailData(null))
+    }).catch(() => {
+      if (done) return
+      finish(); clearTimeout(timer)
+      setDetailFailed(true)
+    })
   }
 
-  function onScroll(e: React.UIEvent<HTMLDivElement>): void {
-    const el = e.currentTarget
-    if (!el || loadingRef.current) return
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 260) {
-      if (page * 100 < total) load(page + 1, sort, query, category, true)
+  // 返回列表时恢复滚动位置(详情是条件渲染,列表会重挂载)。双重 rAF 等布局稳定。
+  useEffect(() => {
+    if (!detail) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const scroller = findScroller(listElRef.current)
+          if (scroller) scroller.scrollTop = listScrollRef.current
+        })
+      })
     }
+  }, [detail])
+
+  function onScroll(e: React.UIEvent<HTMLDivElement>): void {
+    // 列表已全量加载(宿主一次拉完),不需要分页加载。
+    void e
   }
 
   const filtered = items ? items.filter((it) => {
     if (instFilter === 'installed' && !(it.installed || it.disabled)) return false
     if (instFilter === 'uninstalled' && (it.installed || it.disabled)) return false
-    if (instFilter === 'installable' && it.kind !== 'plugin' && it.kind !== 'multi') return false
+    if (instFilter === 'updatable' && !(it.installed && it.hasUpdate)) return false
+    // 可安装 = bundle 插件 / 多插件 / client-only 主题 / 尚未分类(unknown 等后台
+    // 扫描补上;真装不了的会在安装门被拦并给出原因)。
+    if (instFilter === 'installable' && it.kind !== 'plugin' && it.kind !== 'multi' && it.kind !== 'client' && it.kind !== 'skill' && it.kind !== 'unknown') return false
     return true
   }) : []
 
   if (detail) {
     const dd = detailData
     const ddesc = (zh && detail.zhIntro) ? detail.zhIntro : (detail.description || '')
-    const mainBtn = detail.isHarness || Boolean(dd && dd.notPlugin)
+    const mainBtn = detail.isHarness || detail.kind === 'nonplugin'
       ? null
       : !detail.installed && !detail.disabled
-        ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : t('安装插件', 'Install')}</button>
+        ? <button className="zat-btn zat-primary" onClick={() => doInstall(detail)} disabled={!!installing}>{installing ? t('安装中…', 'Installing…') : (detail.kind === 'skill' ? t('安装技能', 'Install skill') : t('安装插件', 'Install'))}</button>
         : detail.installed && detail.hasUpdate
           ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
           : detail.installed
-            ? <button className="zat-btn zat-installed" disabled>✓ {detail.noRepo ? t('已安装', 'Installed') : t('已是最新', 'Up to date')}</button>
+            ? <button className="zat-btn zat-installed" disabled>✓ {detail.noRepo || detail.kind === 'skill' ? t('已安装', 'Installed') : t('已是最新', 'Up to date')}</button>
             : null
     return (
       <div className="zat-panel">
@@ -1039,11 +1127,22 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                 : ''}
             </div>
           )}
-          {Boolean(dd && dd.notPlugin) && (
-            <div className="zat-subchoices">
-              <div className="zat-subchoices-title">
-                {t('这不是可安装的 dsh 插件:仓库里没有插件声明,它可能是一个技能包或代码仓库(只是打了 dsh-plugin 标签)。请到 GitHub 查看它的使用方式。', 'Not an installable dsh plugin: this repository declares no plugin — it may be a skill pack or code repo that merely carries the dsh-plugin topic. Check GitHub for usage instructions.')}
-              </div>
+          {detail.kind === 'skill' && !detail.installed && (
+            <div className="zat-summary">
+              <span className="zat-zhlabel">{t('技能(skill):', 'Skill:')}</span>
+              {t('这是一个技能包,安装后立即生效、无需重启;用 /技能名 或在对话里让它按技能名调用。', 'This is a skill pack — it activates immediately after install (no restart); invoke it with /name or let the model call it by name.')}
+            </div>
+          )}
+          {detail.kind === 'nonplugin' && (
+            <div className="zat-summary">
+              <span className="zat-zhlabel">{t('不可安装:', 'Not installable:')}</span>
+              {t('这个仓库有 package.json,但没有 dsh 插件声明(dsh.bundle / dsh.client),市场不能一键安装。请到 GitHub 按它的 README 手动使用。', 'This repository has a package.json but no dsh plugin declaration (dsh.bundle / dsh.client), so it cannot be installed from the market. See its README on GitHub.')}
+            </div>
+          )}
+          {detail.kind === 'unknown' && Boolean(dd && dd.notPlugin) && !detail.installed && (
+            <div className="zat-summary">
+              <span className="zat-zhlabel">{t('待识别:', 'Unclassified:')}</span>
+              {t('这个仓库还没分类,点「安装」会 clone 下来自动识别:是技能(skill)就一键装进 skills 目录,否则明确提示。', 'This repository is not yet classified — clicking Install will clone it and auto-detect: a skill pack gets installed in one click, otherwise you get a clear message.')}
             </div>
           )}
           {detail.disabled && !detail.isHarness && (
@@ -1061,7 +1160,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
           {!detail.noRepo && (dd
             ? <div className="zat-summary"><span className="zat-zhlabel">{t('README 摘要:', 'README:')}</span>{String(dd.summary || t('该仓库暂无 README 摘要', 'No README summary')).slice(0, 1200)}</div>
-            : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>)}
+            : <div className="zat-status">{detailFailed ? t('README 加载失败(网络不可用),可直接去 GitHub 查看', 'README failed to load (network) — view it on GitHub') : t('正在读取 README 简介…', 'Loading README…')}</div>)}
           <div className="zat-actions">
             {mainBtn}
             {detail.disabled && !detail.isHarness && (
@@ -1074,7 +1173,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                 {installing ? t('处理中…', '...') : t('停用插件', 'Disable')}
               </button>
             )}
-            {(detail.installed || detail.disabled) && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
+            {(detail.installed || detail.disabled) && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{detail.kind === 'skill' ? t('卸载技能', 'Uninstall skill') : t('卸载插件', 'Uninstall')}</button>}
             {!detail.noRepo && <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>}
           </div>
           {notice && <div className="zat-notice">{notice}</div>}
@@ -1159,7 +1258,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         )}
         <div className="zat-search">
           <span>🔍</span>
-          <input placeholder={t('输入即搜索…', 'Type to search…')} value={query} onChange={(e) => setQuery(e.currentTarget.value)} />
+          <input placeholder={t('输入即搜索…', 'Type to search…')} value={query} onChange={(e) => setQuery(e.currentTarget.value)} autoComplete="off" name="zat-search" />
         </div>
         <select className="zat-sel" value={category} onChange={(e) => setCategory(e.currentTarget.value)} title={t('分类', 'Category')}>
           {CATEGORIES.map((cat) => <option key={cat.label} value={cat.label}>{zh ? cat.label : cat.en}</option>)}
@@ -1171,12 +1270,16 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         <select className="zat-sel" value={instFilter} onChange={(e) => {
           const v = e.currentTarget.value as typeof instFilter
           setInstFilter(v)
-          if (v === 'installed') { loadInstalled() } else { setInstalledMode(false); load(1, sort, query, category, false) }
+          // 筛选是客户端本地过滤,不用重新拉列表;只有从「已安装」视图切出来才需要重载。
+          if (v === 'installed') { loadInstalled() }
+          else if (installedMode) { setInstalledMode(false); load(1, sort, query, category, false) }
+          else { setInstalledMode(false) }
         }} title={t('安装状态', 'Install status')}>
           <option value="all">{t('全部插件', 'All')}</option>
           <option value="installed">{t('已安装', 'Installed')}</option>
           <option value="uninstalled">{t('未安装', 'Not installed')}</option>
           <option value="installable">{t('可安装', 'Installable')}</option>
+          <option value="updatable">{t('待更新', 'Updatable')}</option>
         </select>
         <span className="zat-count">{t('显示 ', 'Showing ')}{filtered.length}/{items ? items.length : 0}</span>
         <button className="zat-btn" onClick={runHealth} disabled={checking} title={t('检查已装插件的冲突、依赖矛盾与风险', 'Check installed plugins for conflicts and risks')}>{checking ? t('检测中…', 'Checking…') : t('🩺 一键检测', '🩺 Health check')}</button>
@@ -1201,7 +1304,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
               <span className="zat-lgi"><i style={{ background: '#10b981' }} />✓ {t('已安装(已启用)', 'Installed (enabled)')}</span>
               <span className="zat-lgi"><i style={{ background: '#0ea5e9' }} />↑ {t('有更新', 'Update available')}</span>
               <span className="zat-lgi"><i style={{ background: '#7a4dff' }} />{t('安装', 'Install')}</span>
-              <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·不可安装', 'Skill · not installable')}</span>
+              <span className="zat-lgi"><i style={{ background: '#d97706' }} />{t('技能·可安装', 'Skill · installable')}</span>
               <span className="zat-lgi"><i style={{ background: '#5a6478' }} />{t('非插件·不可安装', 'Not a plugin · not installable')}</span>
               <span className="zat-lgi"><i style={{ background: '#4f46e5' }} />{t('多插件·装时选择', 'Multi · pick one to install')}</span>
               <span className="zat-lgi"><i style={{ background: '#f5b942' }} />★ {t('已星标(点击切换)', 'Starred (click to toggle)')}</span>
@@ -1220,7 +1323,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <button className="zat-btn" onClick={() => setSubChoices(null)}>{t('取消', 'Cancel')}</button>
         </div>
       )}
-      <div className="zat-grid" onScroll={onScroll}>
+      <div className="zat-grid" ref={listElRef} onScroll={onScroll}>
         {error && <div className="zat-status zat-error">⚠ {error}</div>}
         {!items && !error && <div className="zat-status">{t('正在加载插件列表…', 'Loading plugins…')}</div>}
         {items && items.length === 0 && <div className="zat-status">{t('没有找到插件', 'No plugins found')}</div>}
@@ -1233,15 +1336,17 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       <div className="zat-foot">
         <span className="zat-count">
           {profileInfo && profileInfo.profileName ? `${t('当前 profile:', 'Profile: ')}${profileInfo.profileName} · ${profileInfo.profileDir} · ` : ''}
-          {t('已加载 ', 'Loaded ')}{items ? items.length : 0} / {total}{t(' · 滚动到底自动加载 · GitHub 搜索上限 1000', ' · scroll to load more · GitHub cap 1000')}
+          {instFilter !== 'all'
+            ? `${t('已显示 ', 'Showing ')}${filtered.length} / ${total}`
+            : `${t('已加载 ', 'Loaded ')}${items ? items.length : 0} / ${total}`}{t(' · GitHub 搜索上限 1000', ' · GitHub cap 1000')}
         </span>
-        {!installedMode && page * 100 < total && !loading && <button className="zat-btn" onClick={() => load(page + 1, sort, query, category, true)}>{t('加载更多 ↓', 'Load more ↓')}</button>}
       </div>
       <div className="zat-legend">
         <span className="zat-lghead">GitHub Token:</span>
         <input
           className="zat-token"
           type="password"
+          autoComplete="new-password"
           placeholder={t('可选,用于一键星标;只保存在本机 profile 目录', 'Optional, for one-click star; stored only in your local profile')}
           value={tokenInput}
           onChange={(e) => setTokenInput(e.currentTarget.value)}
@@ -1269,24 +1374,35 @@ interface MarketCardProps {
 
 /** A plugin can be disabled unless it is official core or the market itself. */
 function canDisable(item: MarketItem): boolean {
-  if (!item.installed || item.disabled || item.isHarness) return false
+  if (!item.installed || item.disabled || item.isHarness || item.kind === 'skill') return false
   const name = item.installedName || ''
   if (name.startsWith('@deepseek-ai/')) return false
   if (item.fullName.toLowerCase() === 'mishibeikejie/zat-dsh-engine') return false
   return true
 }
 
+/** 找到真正在滚的那个容器(往上找第一个 overflow-y auto/scroll 且确实可滚的祖先)。 */
+function findScroller(el: HTMLElement | null): HTMLElement | null {
+  let node: HTMLElement | null = el
+  while (node) {
+    const oy = window.getComputedStyle(node).overflowY
+    if ((oy === 'auto' || oy === 'scroll') && node.scrollHeight > node.clientHeight + 1) return node
+    node = node.parentElement
+  }
+  return (document.scrollingElement as HTMLElement | null) || document.documentElement
+}
+
 function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, onAction, onStar, onToggle }: MarketCardProps) {
   const [coverErr, setCoverErr] = useState(false)
   const desc = (zh && item.zhIntro) ? item.zhIntro : (item.description || t('暂无简介', 'No description'))
   const hasUpdate = item.installed && item.hasUpdate
-  const nonInstallable = item.kind === 'skill' || item.kind === 'nonplugin'
+  const nonInstallable = item.kind === 'nonplugin'
   const busy = installing || Boolean(item.installing && !item.installed)
   const shownProgress = installing && progress ? progress : taskProgress
   const btnClass = item.disabled
     ? 'zat-disabled'
     : nonInstallable
-      ? (item.kind === 'skill' ? 'zat-noninstall' : 'zat-nonplugin')
+      ? 'zat-nonplugin'
       : (hasUpdate ? 'zat-update' : (item.installed ? 'zat-installed' : 'zat-install'))
   const btnText = busy
     ? t('处理中…', '...')
@@ -1295,12 +1411,10 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
       : item.disabled
         ? (zh ? '已装·未启用 → 点此启用' : 'Installed, disabled → click to enable')
         : nonInstallable
-          ? (item.kind === 'skill'
-            ? (zh ? '技能 · 不可安装' : 'Skill · not installable')
-            : (zh ? '非插件 · 不可安装' : 'Not a plugin'))
+          ? (zh ? '非插件 · 不可安装' : 'Not a plugin')
           : (hasUpdate ? t('更新', 'Update') : (item.installed ? t('已安装', 'Installed') : t('安装', 'Install')))
   return (
-    <div className="zat-card" onClick={() => onOpen(item)}>
+    <div className="zat-card" data-fullname={item.fullName} onClick={() => onOpen(item)}>
       <div className="zat-cover">
         {(coverErr || item.noRepo)
           ? <div className="zat-coverfallback">{String(item.name || '?').slice(0, 1).toUpperCase()}</div>
@@ -1308,6 +1422,7 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
         {item.noRepo && <span className="zat-kindbadge zat-kind-nonplugin">{zh ? 'npm/本地' : 'npm/local'}</span>}
         {item.kind === 'skill' && <span className="zat-kindbadge zat-kind-skill">{zh ? '技能' : 'Skill'}</span>}
         {item.kind === 'nonplugin' && <span className="zat-kindbadge zat-kind-nonplugin">{zh ? '非插件' : 'Not a plugin'}</span>}
+        {item.kind === 'client' && <span className="zat-kindbadge zat-kind-client">{zh ? '主题/UI' : 'Theme/UI'}</span>}
         {item.kind === 'multi' && <span className="zat-kindbadge zat-kind-multi">{zh ? '多插件' : 'Multi'}</span>}
         {hasUpdate
           ? <span className="zat-updbadge">↑ {t('有更新', 'Update')}</span>
