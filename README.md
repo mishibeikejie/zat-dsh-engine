@@ -20,7 +20,8 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 - **Network auto-adaptation** — inherits your VPN/system proxy for fetching and installing; if GitHub is unreachable, requests automatically fall back to `gh-proxy.com` and recover. **Works without a VPN**: proxy → direct → mirror → built-in fetch fallback
 - **One-click enable/disable** — toggle plugins right on the card (official core and the market itself are protected)
 - **Pre-install conflict gate + 🩺 health check** — blocking two marketplaces at once, official-package hijack, duplicate patch rows / registered names; one-click health report on conflicts and dependency issues
-- **Pre-install health + security scan** — every candidate is checked before install (entry files, build artifacts, dependency style, network destinations); the security scan catches obfuscation, credential theft and suspicious exfiltration, with ❌ findings blocking the install; the AI plugin-finder reports the same results honestly
+- **Pre-install health + security scan** — every candidate is checked before install (entry files, build artifacts, dependency style, network destinations, OS support); the security scan catches obfuscation/credential theft/exfiltration but only warns (no false positives); objective issues (missing entries, unsupported OS) are blocked
+- **One-click check + repair** — detects network/pnpm/entry/OS/past-error problems in one click, auto-fixes what it can (installs pnpm, enables plugins, fills deps), and explains the rest
 - **Safe by default** — install/uninstall/toggle roll back automatically on failure; a last-known-good backup restores a broken profile with one command
 - **Live progress bar** — install/update/uninstall show a bar right on the card (percent + live counts); progress survives leaving and re-entering the market
 - **One-click star** — reuses your local git credentials to star repos; badge color legend, auto-fading notices
@@ -113,11 +114,20 @@ This marketplace is at heart a **package manager**, and that job itself requires
 - **Reading git credentials**: used in exactly two places — starring a repo and the "set GitHub token" feature. Credentials only go to api.github.com; they are never written to disk, logged, or sent anywhere else.
 - **The gh-proxy.com mirror**: only as a fallback when a direct GitHub request fails, and only for public repository metadata. A plugin's own network behavior after install has nothing to do with the mirror.
 - **Reading/writing profile files**: install/uninstall/toggle must edit the profile's package.json etc. Every change is backed up to `zat-backup/` first, and failed operations restore automatically.
-- **Pre-install health + security scan**: every candidate and every installed plugin is scanned for structural, dependency, and security patterns (obfuscation, credential theft, suspicious exfiltration, system modification); error-level findings block the install, and all network destinations are listed before install.
+- **Pre-install health + security scan**: every candidate and every installed plugin is scanned for structural, dependency, and security patterns (obfuscation, credential theft, suspicious exfiltration, system modification), with all network destinations listed before install; security findings only warn (never block), while objective issues like missing entries or unsupported OS are blocked.
 
 Each of these is the minimal permission set required for the market to work; if a review questions a specific behavior, this section is the reference.
 
 ## Changelog
+
+### v0.5.0
+
+- One-click check + repair: real detection (network/pnpm/entry files/OS support/past errors), auto-fixes what it can (installs pnpm, enables plugins, fills missing deps), and explains the rest clearly
+- System compatibility: cards show "supported systems" (Windows/macOS/Linux); unsupported plugins are blocked before install
+- Category search fixed (no more 422) + search-term hardening (OR/symbols/Chinese all work) + auto mirror on rate limit
+- Install/update now falls back to two mirrors (gh-proxy + ghfast), so it works without a VPN; triple-retry updates, no more false downgrade prompts
+- Security scan only warns (no false positives, notification plugins no longer flagged); every error is now one line: what went wrong + how to fix
+- npm/locally-installed plugins are visible and manageable in "Installed"; install and detail show "how to use"
 
 ### v0.4.4
 
