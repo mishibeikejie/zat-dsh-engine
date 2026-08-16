@@ -2050,7 +2050,24 @@ export class ZatMarketGateway extends TypertRemoteService {
       const seen: Record<string, boolean> = {}
       for (const key of Object.keys(inst)) {
         const entry = inst[key]
-        if (!entry.owner || !entry.repo) continue
+        if (!entry.owner || !entry.repo) {
+          // 纯 npm / 本地安装:没有 GitHub 仓库,改用 npm 官方源查最新版本。
+          const name = entry.name
+          if (!name || name.startsWith('@deepseek-ai/')) continue
+          const bare = name.replace(/^@[\w.-]+\//, '').toLowerCase()
+          if (seen['npm:' + bare]) continue
+          seen['npm:' + bare] = true
+          try {
+            const local = await this.localVersion(name)
+            let remote: string | null = null
+            const reg = await this.httpGet(`https://registry.npmjs.org/${name.replace('/', '%2F')}`)
+            if (reg.status === 200) {
+              try { remote = (JSON.parse(reg.body) as { 'dist-tags'?: { latest?: string } })['dist-tags']?.latest || null } catch { remote = null }
+            }
+            map[name.toLowerCase()] = { local, remote, hasUpdate: !!(local && remote && compareVersions(remote, local) > 0) }
+          } catch { /* skip unreadable */ }
+          continue
+        }
         const full = entry.owner + '/' + entry.repo
         if (seen[full]) continue
         seen[full] = true
@@ -2460,6 +2477,27 @@ export class ZatMarketGateway extends TypertRemoteService {
           : { ok: false, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  /** 更新一个纯 npm / 本地安装的插件(没有 GitHub 仓库地址)。 */
+  @Remote('updateNpm')
+  async updateNpm(name: string): Promise<JsonObject> {
+    try {
+      const n = safePackageName(name)
+      if (!n) return { ok: false, message: 'invalid package name' }
+      const dir = await this.getProfileDir()
+      this.invalidateListCache()
+      const snap = await this.snapshotProfile(dir)
+      const r = await this.pnpmShell('pnpm update ' + n, dir)
+      if (r.outcome.exitCode !== 0) {
+        await this.restoreProfile(dir, snap)
+        return { ok: false, message: `更新失败,已还原。${(r.stderr || r.stdout || '').trim().slice(-160)}` }
+      }
+      await this.saveLastKnownGood()
+      return { ok: true, message: `已更新 ${n} — 重启 dsh 后生效` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }

@@ -91,6 +91,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/subpackages': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
+    'pluginMarket/updateNpm': (name: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
@@ -136,6 +137,7 @@ interface MarketRemote extends TypertClientRemote {
     subpackages(owner: string, repo: string): Promise<RemoteResult<MarketJson & { kind?: string; packages?: MarketSubpackage[] }>>
     installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
+    updateNpm(name: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
     setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
@@ -186,6 +188,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('subpackages', ['owner', 'repo']),
   desc('installPlugin', ['owner', 'repo', 'subdir']),
   desc('update', ['owner', 'repo', 'subdir']),
+  desc('updateNpm', ['name']),
   desc('uninstall', ['name']),
   desc('setEnabled', ['name', 'enabled']),
   desc('healthCheck', []),
@@ -811,6 +814,20 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   function doUpdate(item: MarketItem): void {
+    if (item.noRepo) {
+      // npm/本地安装:没有 GitHub 仓库,走 pnpm update <name>。
+      const name = item.installedName || item.name
+      setInstalling(item.fullName)
+      void pm.updateNpm(name).then((res) => {
+        setInstalling('')
+        setNotice(res.ok ? String(res.value?.message || '') : res.error.message)
+        if (res.ok && res.value?.ok) refreshItem(item.fullName, { hasUpdate: false, installedVersion: res.value.version || null, latestVersion: res.value.version || null })
+      }).catch((err: unknown) => {
+        setInstalling('')
+        setNotice(String((err as { message?: string })?.message || err))
+      })
+      return
+    }
     setInstalling(item.fullName)
     setProgress({ pct: 2, message: t('正在准备更新…', 'Preparing update…') })
     void pm.update(item.owner, item.name, '').then((res) => {
