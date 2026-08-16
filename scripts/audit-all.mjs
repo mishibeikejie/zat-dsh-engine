@@ -118,6 +118,11 @@ ok(hc.ok === true, 'healthCheck 正常返回')
 console.log('    当前体检条目:')
 for (const it of (hc.issues || [])) console.log(`      [${it.level}] ${it.title}`)
 
+console.log('\n== 6b. 一键修复(干净 profile 上是 no-op,验证不崩)==')
+const rp = await gw.repair()
+console.log(`    repair -> ok=${rp.ok} message=${rp.message}`)
+ok(rp.ok === true, 'repair 正常返回')
+
 console.log('\n== 7. find_plugin 工具 ==')
 const fp = await toolDef.execute({ query: '视觉 图片识别', limit: 5 })
 ok(Array.isArray(fp.items) && fp.items.length > 0, 'find_plugin 返回候选')

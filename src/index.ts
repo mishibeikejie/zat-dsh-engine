@@ -2844,7 +2844,7 @@ export class ZatMarketGateway extends TypertRemoteService {
    */
   @Remote('healthCheck')
   async healthCheck(): Promise<JsonObject> {
-    const issues: Array<{ level: string; title: string; detail: string }> = []
+    const issues: Array<{ level: string; title: string; detail: string; fixable?: boolean }> = []
     try {
       const dir = await this.getProfileDir()
       const p = await this.readProfile()
@@ -2884,7 +2884,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           for (const pd of Object.keys(meta.peerDependencies || {})) {
             if (meta.peerDependenciesMeta?.[pd]?.optional) continue // declared optional — not missing
             const provided = await this.moduleProvided(pd)
-            if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: '这个依赖缺失时插件运行会报错。解决:点「一键修复」自动补装。' })
+            if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: '这个依赖缺失时插件运行会报错。解决:点「一键修复」自动补装。', fixable: true })
           }
           // 入口文件必须真实存在,否则装了也加载不起来。
           const entryCands: string[] = []
@@ -2903,10 +2903,10 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (!fieldSupports(meta.os, process.platform)) issues.push({ level: 'error', title: `${name} 不支持当前系统(仅支持 ${(meta.os || []).join('、')})`, detail: `它不支持你当前的系统(${process.platform}),装了会导致 dsh 起不来。解决:卸载它。` })
           if (!fieldSupports(meta.cpu, process.arch)) issues.push({ level: 'error', title: `${name} 不支持当前 CPU(仅支持 ${(meta.cpu || []).join('、')})`, detail: '解决:卸载它。' })
           if (!enabled && !name.startsWith('@deepseek-ai/')) {
-            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单。解决:点「一键修复」自动启用。' })
+            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单。解决:点「一键修复」自动启用。', fixable: true })
           }
         } catch {
-          issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。解决:点「一键修复」自动补装。' })
+          issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。解决:点「一键修复」自动补装。', fixable: true })
         }
       }
       // Duplicate loader row ids across ENABLED bundles (a disabled plugin
@@ -3069,8 +3069,16 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
       this.invalidateListCache()
+      // 修完再查一遍:把仍然存在、且修不了的问题,原样列给用户(详情在体检报告里)。
+      const hc = await this.healthCheck()
+      if (hc.ok === true && Array.isArray(hc.issues)) {
+        for (const it of hc.issues as Array<{ level: string; title: string; fixable?: boolean }>) {
+          if (it.level === 'ok' || it.fixable) continue
+          if (!remaining.includes(it.title)) remaining.push(it.title)
+        }
+      }
       if (fixed.length === 0 && remaining.length === 0) return { ok: true, fixed, remaining, message: '没有需要修复的问题。' }
-      const msg = `修复 ${fixed.length} 项。` + (remaining.length ? `还有 ${remaining.length} 项修不了:${remaining.join(';')}` : '')
+      const msg = `修复 ${fixed.length} 项。` + (remaining.length ? `还有 ${remaining.length} 项修不了,需要你手动处理(见体检报告):${remaining.slice(0, 3).join(';')}${remaining.length > 3 ? '…' : ''}` : '全部修复完毕。')
       return { ok: true, fixed, remaining, message: msg }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
