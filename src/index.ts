@@ -413,6 +413,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   private readonly searchCache = new Map<string, { at: number; body: string }>()
   /** 每个仓库声明的 os/cpu 支持范围缓存(30 分钟),给卡片打"支持系统"标签。 */
   private readonly osCache = new Map<string, { at: number; os: string[]; cpu: string[] }>()
+  /** 市场自己最近报过的错(安装失败/网络/pnpm 等),一键检测会把这些也列出来。 */
+  private readonly recentIssues: Array<{ at: number; level: string; title: string; detail: string }> = []
   private kindScanStarted = false
 
   constructor(ctx: Context) {
@@ -1811,6 +1813,14 @@ export class ZatMarketGateway extends TypertRemoteService {
     return out
   }
 
+  /** 记录市场自己报过的错(24h 内),一键检测会把这些也一起列出来。 */
+  private recordIssue(title: string, detail: string, level = 'error'): void {
+    const now = Date.now()
+    while (this.recentIssues.length && now - this.recentIssues[0]!.at > 24 * 3600 * 1000) this.recentIssues.shift()
+    if (!this.recentIssues.some((i) => i.title === title)) this.recentIssues.push({ at: now, level, title, detail })
+    while (this.recentIssues.length > 30) this.recentIssues.shift()
+  }
+
   private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[] }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
@@ -1856,15 +1866,18 @@ export class ZatMarketGateway extends TypertRemoteService {
       await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
       if (/pnpm[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)|corepack[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(errText)) {
+        this.recordIssue('没装 pnpm', '装/更新插件都靠它。解决:终端跑 corepack enable(或 npm i -g pnpm)。')
         return { ok: false, packageName: null, message: '没装 pnpm。先跑一条: corepack enable(或 npm i -g pnpm),再重试。' }
       }
       if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
+        this.recordIssue('插件要跑构建脚本被拦截', '在 pnpm-workspace.yaml 的 allowBuilds 里加该插件名再试。', 'warn')
         return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本被 pnpm 拦截(已还原)。在 pnpm-workspace.yaml 的 allowBuilds 里加上该插件名再试。' }
       }
       const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
       const reason = /UND_ERR|ECONN|ETIMEDOUT|Failed to connect|ENOTFOUND|network|fetch/i.test(errText)
         ? '连不上 GitHub/npm(网络问题)'
         : (lastLine.slice(0, 120) || '未知原因')
+      this.recordIssue('安装/更新失败', reason)
       return { ok: false, packageName: null, message: `安装失败:${reason}。已自动回滚,换个网络或稍后重试。` }
     }
     if (taskId) {
@@ -2276,6 +2289,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (alt.outcome.exitCode === 0) r = alt
       }
       if (r.outcome.exitCode !== 0) {
+        this.recordIssue('市场自更新失败', `点更新没成功(网络或 pnpm)。手动一条命令: dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git`)
         return { ok: false, message: `升级失败。手动一条命令搞定: dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git` }
       }
       this.invalidateListCache()
@@ -2827,7 +2841,22 @@ export class ZatMarketGateway extends TypertRemoteService {
       const bundles = Array.isArray((p.dsh as JsonObject | undefined)?.profile && ((p.dsh as JsonObject).profile as JsonObject).bundles)
         ? ((p.dsh as JsonObject).profile as JsonObject).bundles as string[]
         : []
-      interface Scanned { name: string; enabled: boolean; meta: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
+      // pnpm 可用性:装/更新/修复都靠它。
+      let pnpmOk = false
+      try { await this.subprocess.resolveExecutable('pnpm'); pnpmOk = true } catch { /* not on PATH */ }
+      if (!pnpmOk) {
+        try { await this.subprocess.resolveExecutable('corepack'); pnpmOk = true } catch { /* no corepack */ }
+      }
+      if (!pnpmOk) {
+        for (const cand of [join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'), join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'), join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd')]) {
+          if (existsSync(cand)) { pnpmOk = true; break }
+        }
+      }
+      if (!pnpmOk) issues.push({ level: 'error', title: '没装 pnpm', detail: '装/更新插件都靠它。解决:终端里跑一条 corepack enable(或 npm i -g pnpm)。' })
+      // 网络:连不上 GitHub,装/更新插件就都干不了。
+      const netProbe = await this.ghGet('https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/HEAD/package.json')
+      if (netProbe.status === 0) issues.push({ level: 'error', title: '连不上 GitHub', detail: '装/更新插件拉不到代码。解决:开 VPN/系统代理,或确认网络后再试。' })
+      interface Scanned { name: string; enabled: boolean; meta: { main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }>; os?: string[]; cpu?: string[]; dsh?: { bundle?: { patch?: string } } }; patchIds: Set<string> }
       const scanned: Scanned[] = []
       for (const name of deps) {
         try {
@@ -2844,13 +2873,29 @@ export class ZatMarketGateway extends TypertRemoteService {
           for (const pd of Object.keys(meta.peerDependencies || {})) {
             if (meta.peerDependenciesMeta?.[pd]?.optional) continue // declared optional — not missing
             const provided = await this.moduleProvided(pd)
-            if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: 'profile 关闭了自动安装 peer;这个依赖缺失时插件运行时可能报错。手动安装它或反馈给插件作者。' })
+            if (!provided) issues.push({ level: 'warn', title: `${name} 需要的 peer 依赖 ${pd} 未安装`, detail: '这个依赖缺失时插件运行会报错。解决:点「一键修复」自动补装。' })
           }
+          // 入口文件必须真实存在,否则装了也加载不起来。
+          const entryCands: string[] = []
+          if (typeof meta.main === 'string' && meta.main) entryCands.push(meta.main)
+          for (const v of Object.values(meta.exports || {})) {
+            if (typeof v === 'string') entryCands.push(v)
+            else if (v && typeof v === 'object' && typeof v.default === 'string') entryCands.push(v.default)
+          }
+          const missingEntries: string[] = []
+          for (const rel of [...new Set(entryCands)].slice(0, 3)) {
+            if (!rel || rel.includes('*') || rel.startsWith('http')) continue
+            if (!existsSync(join(dir, 'node_modules', name, rel.replace(/^\.\//, '')))) missingEntries.push(rel.replace(/^\.\//, ''))
+          }
+          if (missingEntries.length > 0) issues.push({ level: 'error', title: `${name} 入口文件缺失:${missingEntries.join('、')}`, detail: '这个插件没提交构建产物,装了也加载不起来。解决:卸载它(它本身是坏的)。' })
+          // 系统 / CPU 兼容。
+          if (!fieldSupports(meta.os, process.platform)) issues.push({ level: 'error', title: `${name} 不支持当前系统(仅支持 ${(meta.os || []).join('、')})`, detail: `它不支持你当前的系统(${process.platform}),装了会导致 dsh 起不来。解决:卸载它。` })
+          if (!fieldSupports(meta.cpu, process.arch)) issues.push({ level: 'error', title: `${name} 不支持当前 CPU(仅支持 ${(meta.cpu || []).join('、')})`, detail: '解决:卸载它。' })
           if (!enabled && !name.startsWith('@deepseek-ai/')) {
-            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单,重启后不会加载。可在市场卡片上点「启用」。' })
+            issues.push({ level: 'info', title: `${name} 已停用`, detail: '已安装但不在启用名单。解决:点「一键修复」自动启用。' })
           }
         } catch {
-          issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。可能安装未完成,重装一次即可。' })
+          issues.push({ level: 'warn', title: `找不到 ${name} 的包文件`, detail: '依赖名单里有它,但 node_modules 里没有。解决:点「一键修复」自动补装。' })
         }
       }
       // Duplicate loader row ids across ENABLED bundles (a disabled plugin
@@ -2943,8 +2988,79 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
       }
       if (markets.length > 1) issues.push({ level: 'error', title: '装了多个市场/管理器插件', detail: markets.join('、') + ' 会互相覆盖设置页并注册冲突,建议只保留一个。' })
+      // 市场最近自己报过的错(安装失败/网络/pnpm/自更新失败等),也一起列出来。
+      for (const ri of this.recentIssues) {
+        if (!issues.some((i) => i.title === ri.title)) issues.push({ level: ri.level, title: ri.title, detail: ri.detail })
+      }
       if (issues.length === 0) issues.push({ level: 'ok', title: '体检通过', detail: '没有发现冲突、依赖矛盾或明显风险。' })
       return { ok: true, issues }
+    } catch (err) {
+      return { ok: false, message: String((err as { message?: string })?.message || err) }
+    }
+  }
+
+  /**
+   * 一键修复:自动解决能安全修复的问题(启用已停用插件、补装缺失依赖/包文件)。
+   * 修不了的(系统不支持、入口文件缺失、官方包写错、冲突、网络、pnpm 缺失)不硬来,
+   * 原样留在 remaining 里,由 healthCheck 的说明告诉用户怎么办。
+   */
+  @Remote('repair')
+  async repair(): Promise<JsonObject> {
+    const fixed: string[] = []
+    const remaining: string[] = []
+    try {
+      const dir = await this.getProfileDir()
+      const p = await this.readProfile()
+      const deps = Object.keys((p.dependencies || {}) as Record<string, string>)
+      const profile = ((p.dsh as JsonObject | undefined)?.profile || {}) as JsonObject
+      const bundles = Array.isArray(profile.bundles) ? [...(profile.bundles as string[])] : []
+      // 1) 装了但没启用的第三方插件 → 启用。
+      const toEnable: string[] = []
+      for (const name of deps) {
+        if (name.startsWith('@deepseek-ai/')) continue
+        if (!bundles.includes(name)) toEnable.push(name)
+      }
+      if (toEnable.length > 0) {
+        const snap = await this.snapshotProfile(dir)
+        p.dsh = p.dsh || {}
+        ;(p.dsh as JsonObject).profile = (p.dsh as JsonObject).profile || {}
+        ;((p.dsh as JsonObject).profile as JsonObject).bundles = [...bundles, ...toEnable]
+        await this.writeProfile(p)
+        try {
+          const check = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as JsonObject
+          const checkBundles = ((check.dsh as JsonObject | undefined)?.profile as JsonObject | undefined)?.bundles
+          if (!Array.isArray(checkBundles) || !toEnable.every((n) => checkBundles.includes(n))) throw new Error('bundles not persisted')
+          fixed.push(`已启用 ${toEnable.join('、')}`)
+        } catch {
+          await this.restoreProfile(dir, snap)
+          remaining.push('启用插件失败,已还原;请重启 dsh 后重试。')
+        }
+      }
+      // 2) 缺失的 peer 依赖 / 缺包文件 → pnpm install 一次补全。
+      const missingPeers = new Set<string>()
+      let missingPkg = false
+      for (const name of deps) {
+        try {
+          const meta = JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')) as { peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }> }
+          for (const pd of Object.keys(meta.peerDependencies || {})) {
+            if (meta.peerDependenciesMeta?.[pd]?.optional) continue
+            if (pd.startsWith('@deepseek-ai/')) continue
+            if (!(await this.moduleProvided(pd))) missingPeers.add(pd)
+          }
+        } catch { missingPkg = true }
+      }
+      if (missingPeers.size > 0 || missingPkg) {
+        const r = await this.pnpmShell('pnpm install', dir)
+        if (r.outcome.exitCode === 0) {
+          fixed.push('已补装缺失依赖' + (missingPeers.size ? `:${[...missingPeers].join('、')}` : ''))
+        } else {
+          remaining.push(`依赖补装失败(网络或 pnpm 问题):${[...missingPeers].join('、') || '缺包文件'}。开代理后再点一次,或手动 dsh plugin add。`)
+        }
+      }
+      this.invalidateListCache()
+      if (fixed.length === 0 && remaining.length === 0) return { ok: true, fixed, remaining, message: '没有需要修复的问题。' }
+      const msg = `修复 ${fixed.length} 项。` + (remaining.length ? `还有 ${remaining.length} 项修不了:${remaining.join(';')}` : '')
+      return { ok: true, fixed, remaining, message: msg }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }

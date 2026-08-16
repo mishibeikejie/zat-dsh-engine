@@ -94,6 +94,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/uninstall': (name: string) => Promise<RemoteResult<MarketJson>>
     'pluginMarket/setEnabled': (name: string, enabled: boolean) => Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
     'pluginMarket/healthCheck': () => Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
+    'pluginMarket/repair': () => Promise<RemoteResult<MarketJson & { fixed?: string[]; remaining?: string[]; message?: string }>>
     'pluginMarket/taskStatus': (taskId: string) => Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     'pluginMarket/installedList': () => Promise<RemoteResult<MarketListResult>>
     'pluginMarket/osMap': (fullNames: string[]) => Promise<RemoteResult<MarketJson & { map?: Record<string, { os?: string[]; cpu?: string[] }> }>>
@@ -137,6 +138,8 @@ interface MarketRemote extends TypertClientRemote {
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
     uninstall(name: string): Promise<RemoteResult<MarketJson>>
     setEnabled(name: string, enabled: boolean): Promise<RemoteResult<MarketJson & { enabled?: boolean }>>
+    healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
+    repair(): Promise<RemoteResult<MarketJson & { fixed?: string[]; remaining?: string[]; message?: string }>>
     healthCheck(): Promise<RemoteResult<MarketJson & { issues?: HealthIssue[] }>>
     taskStatus(taskId: string): Promise<RemoteResult<MarketJson & { task?: { step?: string; message?: string; progress?: number; done?: boolean; ok?: boolean; result?: MarketJson } }>>
     installedList(): Promise<RemoteResult<MarketListResult>>
@@ -186,6 +189,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('uninstall', ['name']),
   desc('setEnabled', ['name', 'enabled']),
   desc('healthCheck', []),
+  desc('repair', []),
   desc('taskStatus', ['taskId']),
   desc('installedList', []),
   desc('osMap', ['fullNames']),
@@ -848,6 +852,19 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     })
   }
 
+  function runRepair(): void {
+    setChecking(true)
+    void pm.repair().then((res) => {
+      setChecking(false)
+      const value = res.ok ? res.value : null
+      setNotice(res.ok ? String(value?.message || '') : res.error.message)
+      if (res.ok && value?.ok) runHealth()
+    }).catch((err: unknown) => {
+      setChecking(false)
+      setNotice(String((err as { message?: string })?.message || err))
+    })
+  }
+
   function doSetEnabled(item: MarketItem, enabled: boolean): void {
     const name = item.installedName
     if (!name) return
@@ -1062,6 +1079,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             </small>
           </span>
         </div>
+        {notice && <div className="zat-notice">{notice}</div>}
         <div className="zat-detail">
           {health.map((it, i) => (
             <div key={i} className={'zat-hitem zat-h-' + (it.level === 'error' ? 'error' : it.level === 'warn' ? 'warn' : it.level === 'ok' ? 'ok' : 'info')}>
@@ -1072,6 +1090,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <div className="zat-actions">
             <button className="zat-btn" onClick={() => setHealth(null)}>{t('返回市场', 'Back to market')}</button>
             <button className="zat-btn" onClick={runHealth} disabled={checking}>{checking ? t('检测中…', 'Checking…') : t('再测一次', 'Run again')}</button>
+            <button className="zat-btn zat-primary" onClick={runRepair} disabled={checking}>{checking ? t('修复中…', 'Fixing…') : t('🔧 一键修复', 'Fix all')}</button>
           </div>
         </div>
       </div>
