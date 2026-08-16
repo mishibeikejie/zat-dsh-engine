@@ -167,26 +167,28 @@ const SELF_VERSION = '0.4.4'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
-  '皮肤 / 主题': '(theme OR skin OR wallpaper OR web-ui OR ui-theme)',
-  '工具 / 终端': '(tool OR tools OR utils OR utility OR cli OR tui OR terminal OR console)',
-  '浏览器 / 自动化': '(browser OR playwright OR chrome OR firefox OR webkit OR selenium OR automation OR workflow)',
-  '技能 Skills': '(skill OR skills OR prompt)',
-  '视觉 / 多媒体': '(vision OR ocr OR image OR video OR multimodal OR render OR media OR hyperframe OR audio OR voice OR tts OR speech)',
-  '网络 / MCP': '(network OR http OR api OR server OR mcp OR web OR fetch)',
-  '多智能体 / 编排': '(multi-agent OR orchestration OR swarm OR agent-framework)',
-  '数据 / 存储 / 记忆': '(data OR database OR sqlite OR storage OR query OR memory OR context)',
-  '硬件 / 桌面': '(gpu OR cuda OR nvidia OR hardware OR vram OR ollama OR launcher OR tray OR autostart OR webview OR desktop)',
-  '设计 / 文档': '(design OR figma OR ui OR prototype OR doc OR handbook OR tutorial OR guide OR manual OR wiki)',
-  '安全 / 通知': '(security OR sandbox OR permission OR audit OR notification OR message OR telegram OR wechat OR slack OR discord)',
+  // GitHub 仓库搜索不支持括号分组和 OR 组合(会 422),所以每个分类只用一个代表关键词。
+  '皮肤 / 主题': 'theme',
+  '工具 / 终端': 'tool',
+  '浏览器 / 自动化': 'browser',
+  '技能 Skills': 'skill',
+  '视觉 / 多媒体': 'vision',
+  '网络 / MCP': 'network',
+  '多智能体 / 编排': 'agent',
+  '数据 / 存储 / 记忆': 'data',
+  '硬件 / 桌面': 'desktop',
+  '设计 / 文档': 'design',
+  '安全 / 通知': 'security',
 }
 
 function encodeQueryPart(s: string): string {
   // Full percent-encoding keeps every character the user types (Chinese,
   // %, &, #, +, …) inside the query value instead of breaking the URL or
-  // being parsed as a GitHub query operator. Quotes and backslashes are
-  // query operators with no useful literal meaning in a market search, so
-  // they degrade to spaces; otherwise GitHub answers "Validation Failed" 400.
-  return encodeURIComponent(String(s).replace(/["\\]/g, ' ')).replace(/%20/g, '+')
+  // being parsed as a GitHub query operator. Quotes, backslashes and
+  // parentheses are query operators with no useful literal meaning in a
+  // market search, so they degrade to spaces; otherwise GitHub answers
+  // "Validation Failed" 400 / "Unprocessable Entity" 422.
+  return encodeURIComponent(String(s).replace(/["\\()]/g, ' ')).replace(/%20/g, '+')
 }
 
 /** Reject anything that is not a plain GitHub owner/repo segment. */
@@ -254,7 +256,7 @@ export function compareVersions(a: string, b: string): number {
  * An empty/absent field means "no restriction".
  */
 export function fieldSupports(field: readonly string[] | undefined, current: string): boolean {
-  if (!field || field.length === 0) return true
+  if (!Array.isArray(field) || field.length === 0) return true
   const negated = field.filter((e) => e.startsWith('!')).map((e) => e.slice(1))
   const allowed = field.filter((e) => !e.startsWith('!'))
   if (negated.length > 0) return !negated.includes(current)
@@ -1798,13 +1800,23 @@ export class ZatMarketGateway extends TypertRemoteService {
     return `https://gh-proxy.com/https://github.com/${m[1]}/${m[2]}.git${m[3] || ''}`
   }
 
+  /** All mirror install specs (gh-proxy, then ghfast.top) for a github spec. */
+  private mirrorSpecs(spec: string): string[] {
+    const m = String(spec).match(/^github:([\w.-]+)\/([\w.-]+?)(#.*)?$/i)
+    if (!m) return []
+    const out: string[] = []
+    for (const host of ['https://gh-proxy.com/', 'https://ghfast.top/']) {
+      out.push(`${host}https://github.com/${m[1]}/${m[2]}.git${m[3] || ''}`)
+    }
+    return out
+  }
+
   private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[] }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
     const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
-    const mirrorSpec = this.mirrorSpecFor(spec)!
     const dir = await this.getProfileDir()
     const gate = await this.checkMarketConflict(o, repoName)
     if (gate) return { ok: false, packageName: null, message: gate }
@@ -1833,26 +1845,27 @@ export class ZatMarketGateway extends TypertRemoteService {
       this.setTaskProgress(taskId, pct, `正在下载安装包…(已进行 ${secs} 秒)${counts ? ' · ' + counts : ''}`)
     } : undefined
     // 默认走官方 GitHub(开 VPN/代理的用户走官方渠道);已知直连不通时优先镜像;
-    // 安装时直连失败再自动补一次镜像重试,让没 VPN 的用户也能装。
-    let pnpmResult = await this.pnpmShell('pnpm add ' + (this.directDown ? mirrorSpec : spec), dir, progress)
-    if (pnpmResult.outcome.exitCode !== 0) {
-      const alt = await this.pnpmShell('pnpm add ' + (this.directDown ? spec : mirrorSpec), dir, progress)
+    // 直连失败再依次尝试两个国内镜像,让没 VPN 的用户也能装。
+    const candidates = this.directDown ? [...this.mirrorSpecs(spec), spec] : [spec, ...this.mirrorSpecs(spec)]
+    let pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+    for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
+      const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
       if (alt.outcome.exitCode === 0) pnpmResult = alt
     }
     if (pnpmResult.outcome.exitCode !== 0) {
       await this.restoreProfile(dir, snap)
       const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
       if (/pnpm[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)|corepack[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(errText)) {
-        return { ok: false, packageName: null, message: '安装失败:本机没有可用的 pnpm。pnpm 是 dsh 插件系统的必备组件,请先安装 Node.js(自带 corepack,运行 corepack enable)或安装 pnpm 后重试。' }
+        return { ok: false, packageName: null, message: '没装 pnpm。先跑一条: corepack enable(或 npm i -g pnpm),再重试。' }
       }
       if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
-        return {
-          ok: false,
-          packageName: null,
-          message: `安装失败:该插件安装时需要运行构建脚本,被 pnpm 安全策略阻止(配置已自动还原)。请手动编辑 ${join(dir, 'pnpm-workspace.yaml')},在 allowBuilds 列表中加入该插件名后重试,或改用官方命令: dsh plugin --profile <你的profile> add ${spec}`,
-        }
+        return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本被 pnpm 拦截(已还原)。在 pnpm-workspace.yaml 的 allowBuilds 里加上该插件名再试。' }
       }
-      return { ok: false, packageName: null, message: (errText.slice(0, 2000) || 'pnpm failed') + ' — profile 配置已自动回滚到安装前状态' }
+      const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+      const reason = /UND_ERR|ECONN|ETIMEDOUT|Failed to connect|ENOTFOUND|network|fetch/i.test(errText)
+        ? '连不上 GitHub/npm(网络问题)'
+        : (lastLine.slice(0, 120) || '未知原因')
+      return { ok: false, packageName: null, message: `安装失败:${reason}。已自动回滚,换个网络或稍后重试。` }
     }
     if (taskId) {
       this.setTaskStep(taskId, 'verify', '下载完成,正在校验并写入启用名单…')
@@ -1922,7 +1935,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (qText) query += '+' + encodeQueryPart(qText)
       const url = `https://api.github.com/search/repositories?q=${query}&sort=${sortKey}&order=desc&per_page=100&page=${pageNum}`
       const r = await this.ghSearch(url)
-      if (r.status !== 200) return { ok: false, message: `GitHub 请求失败(${r.status})${r.status === 400 ? '。搜索词可能含特殊字符,换个说法试试' : ''}${r.error ? ' — ' + r.error : ''}。已依次尝试系统代理、直连、国内镜像 gh-proxy.com 和内置请求,全部失败。请确认网络可用;使用 VPN 时请用系统代理模式。` }
+      if (r.status !== 200) return { ok: false, message: `搜索失败(${r.status})。${r.status === 400 || r.status === 422 ? '搜索词无效,换个说法试试。' : '连不上 GitHub,请开代理或稍后重试。'}` }
       let json: { items?: unknown[]; total_count?: number } | null = null
       try {
         json = JSON.parse(r.body) as { items?: unknown[]; total_count?: number } | null
@@ -2247,7 +2260,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       return { ok: true, hasUpdate: true, current: SELF_VERSION, latestVersion: remote, changes }
     }
     const spec = 'github:' + owner + '/' + repo
-    const mirrorSpec = this.mirrorSpecFor(spec) || spec
+    const candidates = this.directDown ? [...this.mirrorSpecs(spec), spec] : [spec, ...this.mirrorSpecs(spec)]
     const taskId = this.launchTask(async (id) => {
       this.setTaskStep(id, 'update', '正在下载市场新版本…')
       this.setTaskProgress(id, 8, '正在下载市场新版本…(网络慢时可能较久,请稍候)')
@@ -2257,14 +2270,13 @@ export class ZatMarketGateway extends TypertRemoteService {
         const secs = Math.floor((Date.now() - startedAt) / 1000)
         this.setTaskProgress(id, Math.min(80, 8 + secs * 2), `正在下载市场新版本…(已进行 ${secs} 秒)`)
       }
-      let r = await this.pnpmShell('pnpm add ' + (this.directDown ? mirrorSpec : spec), dir, progress)
-      if (r.outcome.exitCode !== 0) {
-        const alt = await this.pnpmShell('pnpm add ' + (this.directDown ? spec : mirrorSpec), dir, progress)
+      let r = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+      for (let i = 1; i < candidates.length && r.outcome.exitCode !== 0; i++) {
+        const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
         if (alt.outcome.exitCode === 0) r = alt
       }
       if (r.outcome.exitCode !== 0) {
-        const manual = `dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git`
-        return { ok: false, message: (r.stderr || r.stdout || 'pnpm failed').slice(0, 2000) + `\n\n升级没成功。可以手动跑这条命令(走国内镜像,不依赖本机网络):\n${manual}\n跑完重启 dsh 即可。` }
+        return { ok: false, message: `升级失败。手动一条命令搞定: dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git` }
       }
       this.invalidateListCache()
       await this.saveLastKnownGood()

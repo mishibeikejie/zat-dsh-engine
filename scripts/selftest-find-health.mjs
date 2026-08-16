@@ -179,6 +179,11 @@ const osm = await gw.osMap(['mishibeikejie/zat-dsh-engine'])
 const osmEntry = osm.map && osm.map['mishibeikejie/zat-dsh-engine']
 console.log(`  osMap: ${osmEntry ? `os=[${osmEntry.os}] cpu=[${osmEntry.cpu}]` : '(无)'}`)
 assert(osm.ok === true && osmEntry && Array.isArray(osmEntry.os), 'osMap 返回本仓库的 os/cpu')
+
+console.log('\n== 分类搜索不 422 ==')
+const catList = await gw.list(1, 'stars', '', '皮肤 / 主题')
+console.log(`  list(皮肤/主题): ok=${catList.ok} items=${(catList.items || []).length}`)
+assert(catList.ok === true && Array.isArray(catList.items), '分类搜索不再报 422')
 const su = await gw.selfupdate(false)
 console.log(`  selfupdate(false): hasUpdate=${su.hasUpdate} devLink=${su.devLink} message=${su.message}`)
 assert(su.hasUpdate === false, 'link 安装下不提示更新(本地 0.4.3 领先 GitHub 0.4.2,不提示降级)')
