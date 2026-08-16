@@ -304,6 +304,11 @@ const css = `
 .zat-pfill{height:100%;background:linear-gradient(90deg,#3d6bff,#7a4dff);border-radius:6px;transition:width .5s}
 .zat-ptext{font-size:11.5px;color:var(--color-fg2,#a8b2c4);margin-top:3px;line-height:1.5}
 .zat-detail{display:flex;flex-direction:column;gap:12px;overflow-y:auto;min-height:0;padding:2px}
+.zat-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.zat-col{display:flex;flex-direction:column;gap:10px;min-width:0}
+.zat-colhead{font-size:13px;font-weight:700;color:var(--color-fg1,#eef1f7);display:flex;align-items:center;gap:8px}
+.zat-colhead small{font-size:11.5px;color:var(--color-fg3,#7c8698);font-weight:400}
+@media (max-width:820px){.zat-cols{grid-template-columns:1fr}}
 .zat-dcover{width:100%;max-width:480px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:var(--color-bg2,#1c2333);border:1px solid var(--color-border,#ffffff14)}
 .zat-dcover img{width:100%;height:100%;object-fit:cover}
 .zat-dtitle{font-size:22px;font-weight:750;color:var(--color-fg1,#f2f5fa)}
@@ -1309,6 +1314,40 @@ function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote
     })
   }
 
+  const active = sessions ? sessions.filter((s) => !s.archived) : null
+  const archived = sessions ? sessions.filter((s) => s.archived) : null
+
+  function renderList(list: SessionItem[], head: string, empty: string): React.ReactNode {
+    return (
+      <div className="zat-col">
+        <div className="zat-colhead">
+          {head}
+          <small>{t('共 ', '')}{list.length}{t(' 个', '')}</small>
+        </div>
+        {list.length === 0
+          ? <div className="zat-status">{empty}</div>
+          : (
+            <div className="zat-detail">
+              {list.map((it) => (
+                <div key={it.id} className="zat-srow">
+                  <span className="zat-smeta">
+                    <span className="zat-stitle" title={it.id}>{it.title || t('(无标题)', '(untitled)')}</span>
+                    <span className="zat-sid" title={it.id}>{it.id}</span>
+                    <span className="zat-stime">{new Date(Number(it.createdAt)).toLocaleString()}</span>
+                    {it.live && <span className="zat-tag zat-tag-live">{t('运行中', 'Running')}</span>}
+                    {it.subagent && <span className="zat-tag">{t('子代理', 'Subagent')}</span>}
+                  </span>
+                  <button className="zat-btn zat-delete" onClick={() => remove(it)} disabled={!!busy || it.live || it.subagent}>
+                    {busy === it.id ? t('删除中…', 'Deleting…') : t('删除', 'Delete')}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+      </div>
+    )
+  }
+
   return (
     <div className="zat-panel">
       <div className="zat-bar">
@@ -1321,24 +1360,10 @@ function SessionManagerPanel({ pm, locale, refreshSessions }: { pm: MarketRemote
       {notice && <div className="zat-notice">{notice}</div>}
       {error && <div className="zat-status zat-error">⚠ {error}</div>}
       {sessions === null && !error && <div className="zat-status">{t('正在读取会话列表…', 'Loading sessions…')}</div>}
-      {sessions !== null && sessions.length === 0 && <div className="zat-status">{t('没有会话', 'No sessions')}</div>}
-      {sessions !== null && sessions.length > 0 && (
-        <div className="zat-detail">
-          {sessions.map((it) => (
-            <div key={it.id} className="zat-srow">
-              <span className="zat-smeta">
-                <span className="zat-stitle" title={it.id}>{it.title || t('(无标题)', '(untitled)')}</span>
-                <span className="zat-sid" title={it.id}>{it.id}</span>
-                <span className="zat-stime">{new Date(Number(it.createdAt)).toLocaleString()}</span>
-                {it.live && <span className="zat-tag zat-tag-live">{t('运行中', 'Running')}</span>}
-                {it.subagent && <span className="zat-tag">{t('子代理', 'Subagent')}</span>}
-                {it.archived && <span className="zat-tag">{t('已归档', 'Archived')}</span>}
-              </span>
-              <button className="zat-btn zat-delete" onClick={() => remove(it)} disabled={!!busy || it.live || it.subagent}>
-                {busy === it.id ? t('删除中…', 'Deleting…') : t('删除', 'Delete')}
-              </button>
-            </div>
-          ))}
+      {sessions !== null && active !== null && archived !== null && (
+        <div className="zat-cols">
+          {renderList(active, t('对话管理', 'Sessions'), t('没有进行中的会话', 'No active sessions'))}
+          {renderList(archived, t('归档管理', 'Archived'), t('没有已归档的会话', 'No archived sessions'))}
         </div>
       )}
     </div>

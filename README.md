@@ -123,6 +123,7 @@ Each of these is the minimal permission set required for the market to work; if 
 
 - Fix: no more automatic GitHub login popup when you're not signed in; starring no longer forces a login redirect
 - Fix: installing a plugin now falls back to the domestic mirror when direct GitHub fails, so it works without a VPN; a missing pnpm now yields a clear error
+- New: the Sessions page is now two columns — the right "Archived" column lists archived sessions separately, deletable directly
 
 ### v0.4.3
 
