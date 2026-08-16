@@ -2981,14 +2981,15 @@ export class ZatMarketGateway extends TypertRemoteService {
       // Security scan of every ENABLED third-party plugin's actual installed
       // code (host + client). Official @deepseek-ai/* packages are skipped:
       // they ship with the harness and the user cannot uninstall them.
+      // 这里只是"提示"——真正的拦截在搜插件(装前体检)和安装门那一步;已装的只提醒,不逼着停用。
       for (const s of scanned) {
         if (!s.enabled || s.name.startsWith('@deepseek-ai/')) continue
         const texts = await this.readLocalTexts(s.name)
         for (const f of scanSecurity(texts.hostText, `${s.name} 宿主代码`)) {
-          issues.push({ level: f.level, title: f.title, detail: f.detail })
+          issues.push({ level: 'warn', title: f.title, detail: f.detail })
         }
         for (const f of scanSecurity(texts.clientText, `${s.name} 界面代码`)) {
-          issues.push({ level: f.level, title: f.title, detail: f.detail })
+          issues.push({ level: 'warn', title: f.title, detail: f.detail })
         }
       }
       // Multiple market/manager plugins.
