@@ -443,8 +443,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         setNotice(String(value.message || ''))
       } else if (res.ok && value && value.needToken) {
         setNotice(String(value.message || t('需要 GitHub 凭据才能一键星标', 'A GitHub credential is required to star')))
-        const u = String((value as { url?: string }).url || item.htmlUrl || `https://github.com/${item.fullName}`)
-        window.open(u, '_blank', 'noopener')
       } else {
         setNotice(res.ok ? String(value?.message || t('星标失败', 'Star failed')) : res.error.message)
       }

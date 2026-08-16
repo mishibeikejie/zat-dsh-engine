@@ -161,7 +161,7 @@ const TTL = 10 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.4.3'
+const SELF_VERSION = '0.4.4'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -1164,7 +1164,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           return cr.status === 200 ? cr.body : ''
         })(),
         (async (): Promise<{ archived?: boolean; disabled?: boolean; fork?: boolean; pushed_at?: string } | null> => {
-          const token = await this.resolveToken()
+          const token = await this.resolveConfiguredToken()
           if (!token) return null
           const mr = await this.ghApi('GET', `/repos/${owner}/${repo}`, token)
           if (mr.status !== 200) return null
@@ -1559,7 +1559,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     const hit = this.searchCache.get(url)
     if (hit && Date.now() - hit.at < 10 * 60 * 1000) return { status: 200, body: hit.body }
     let r: { status: number; body: string; error?: string } = { status: 0, body: '', error: '' }
-    const token = await this.resolveToken()
+    const token = await this.resolveConfiguredToken()
     if (token) {
       const path = url.slice('https://api.github.com'.length)
       r = await this.ghApi('GET', path, token)
@@ -2810,13 +2810,14 @@ export class ZatMarketGateway extends TypertRemoteService {
     return { status: 0, body: '', error: 'curl failed' }
   }
 
-  /** Ask the local git credential helper for the github.com password/token. */
+  /** Ask the local git credential helper for the github.com token — NEVER prompts. */
   private async gitCredentialToken(): Promise<string | null> {
     let git = 'git'
     try { git = await this.subprocess.resolveExecutable('git') } catch { return null }
     try {
       const handle = this.subprocess.spawn({
-        argv: [git, 'credential', 'fill'],
+        // credential.interactive=false: 只读已保存的凭据,绝不弹登录窗/浏览器。
+        argv: [git, '-c', 'credential.interactive=false', 'credential', 'fill'],
         cwd: this.shellCwd(),
         stdio: { stdin: { data: 'protocol=https\nhost=github.com\n\n' }, stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 16 * 1024 } },
         graceMs: 30000,
@@ -2830,19 +2831,31 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { return null }
   }
 
-  /** Resolve a GitHub token: env → local profile config → git credential helper. Cached. */
+  /**
+   * Token only from non-interactive sources (env / market config). Used by the
+   * automatic search & health paths — they must never touch `git credential
+   * fill`, whose credential manager pops a GitHub login window when the user
+   * has no stored credentials.
+   */
+  private async resolveConfiguredToken(): Promise<string | null> {
+    try {
+      const envTok = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+      if (envTok && envTok.trim()) return envTok.trim()
+      const dir = await this.getProfileDir()
+      const cfg = JSON.parse(readFileSync(join(dir, 'zat-market.json'), 'utf8')) as JsonObject
+      if (typeof cfg.githubToken === 'string' && cfg.githubToken.trim()) return cfg.githubToken.trim()
+    } catch { /* no config */ }
+    return null
+  }
+
+  /** Resolve a GitHub token: env → local profile config → git credential helper (non-interactive). Cached. */
   private resolveToken(): Promise<string | null> {
     if (this.tokenResolved) return Promise.resolve(this.tokenValue)
     if (this.tokenPromise) return this.tokenPromise
     this.tokenPromise = (async () => {
       try {
-        const envTok = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
-        if (envTok && envTok.trim()) return envTok.trim()
-        try {
-          const dir = await this.getProfileDir()
-          const cfg = JSON.parse(readFileSync(join(dir, 'zat-market.json'), 'utf8')) as JsonObject
-          if (typeof cfg.githubToken === 'string' && cfg.githubToken.trim()) return cfg.githubToken.trim()
-        } catch { /* no local config */ }
+        const configured = await this.resolveConfiguredToken()
+        if (configured) return configured
         return await this.gitCredentialToken()
       } catch { return null }
     })().then((t) => {
@@ -2864,8 +2877,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         return {
           ok: false,
           needToken: true,
-          url: `https://github.com/${o}/${r}`,
-          message: '一键星标需要 GitHub 凭据:本机没有可用的 git 凭据,也没有配置 Token。已在浏览器打开仓库页面,可以手动点星;或在市场底部填一个 GitHub Token 后再试。',
+          message: '一键星标需要已保存的 GitHub 凭据或 Token,本机还没有。可在市场底部填一个 GitHub Token 后再点星;不会强制你登录。',
         }
       }
       const cur = await this.ghApi('GET', `/user/starred/${o}/${r}`, token)

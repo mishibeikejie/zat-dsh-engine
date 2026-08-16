@@ -119,6 +119,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.4.4
+
+- Fix: no more automatic GitHub login popup when you're not signed in; starring no longer forces a login redirect
+
 ### v0.4.3
 
 - New: say what you need in any chat and the AI finds plugins, with a pre-install health + security scan per candidate
