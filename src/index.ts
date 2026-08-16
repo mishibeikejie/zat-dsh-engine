@@ -139,6 +139,8 @@ interface PluginListItem {
   disabled?: boolean
   /** Repo kind: plugin | nonplugin | multi | skill | unknown. */
   kind?: string
+  /** Installed from npm/link with no GitHub repo address (no update/star/detail). */
+  noRepo?: boolean
   cover: string
 }
 
@@ -870,32 +872,37 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /** Fetch a candidate repo's manifest and code files (network, mirror-backed). */
-  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } } | null> {
+  private async fetchCandidateTexts(owner: string, repo: string, subdir?: string): Promise<{ hostText: string; clientText: string; missingEntries: string[]; meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } } | null> {
     const base = subdir ? `${subdir}/` : ''
     const pkgRes = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}package.json`)
     if (pkgRes.status !== 200) return null
     let meta: { name?: string; main?: string; exports?: Record<string, string | { default?: string }>; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; dsh?: { bundle?: { patch?: string } } } = {}
     try { meta = JSON.parse(pkgRes.body) as typeof meta } catch { return null }
-    const candidates = [meta.main]
+    const declared: string[] = []
+    if (typeof meta.main === 'string' && meta.main) declared.push(meta.main)
     for (const v of Object.values(meta.exports || {})) {
-      if (typeof v === 'string') candidates.push(v)
-      else if (v && typeof v === 'object' && typeof v.default === 'string') candidates.push(v.default)
+      if (typeof v === 'string') declared.push(v)
+      else if (v && typeof v === 'object' && typeof v.default === 'string') declared.push(v.default)
     }
-    candidates.push('lib/host.js', 'lib/index.js', 'dist/index.js', 'lib/client.js', 'dist/client.js')
+    const declaredSet = new Set(declared.filter((r) => r && !r.includes('*') && !r.startsWith('http')))
+    const candidates = [...declaredSet, 'lib/host.js', 'lib/index.js', 'dist/index.js', 'lib/client.js', 'dist/client.js']
     let hostText = ''
     let clientText = ''
+    const missingEntries: string[] = []
     for (const rel of [...new Set(candidates)]) {
       if (!rel || rel.includes('*') || rel.startsWith('http')) continue
       const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${rel}`)
       if (r.status === 200) {
         if (/client/i.test(rel)) { clientText += '\n' + r.body } else { hostText += '\n' + r.body }
+      } else if (declaredSet.has(rel)) {
+        missingEntries.push(rel.replace(/^\.\//, ''))
       }
     }
     if (meta.dsh?.bundle?.patch) {
       const pr = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${base}${meta.dsh.bundle.patch}`)
       if (pr.status === 200) hostText += '\n' + pr.body
     }
-    return { hostText, clientText, meta }
+    return { hostText, clientText, missingEntries, meta }
   }
 
   /** Deep scan of a candidate repo's files (network) — used before pnpm runs. */
@@ -994,6 +1001,13 @@ export class ZatMarketGateway extends TypertRemoteService {
     const f = await this.fetchCandidateTexts(owner, repo, subdir)
     if (!f) return { block, warn }
     const meta = f.meta
+    // (0) Declared entry files must exist in the repo — a plugin pointing at
+    // uncommitted build artifacts (dist not committed) installs but can never
+    // load. Block it here instead of letting pnpm fail (or worse, succeed and
+    // break dsh on the next restart).
+    if (f.missingEntries.length > 0) {
+      block.push(`入口文件缺失:${f.missingEntries.join('、')} — 构建产物没提交到仓库,装了也加载不起来`)
+    }
     // (1) Official packages must be peers, never direct deps — a direct dep
     // installs a second copy and hijacks the official loader rows.
     for (const d of Object.keys(meta.dependencies || {})) {
@@ -2524,6 +2538,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const p = await this.readProfile()
       const inst = this.installedMap(p)
       const unique: Array<{ name: string; owner: string; repo: string; enabled: boolean; installing?: boolean; taskId?: string }> = []
+      const noRepo: Array<{ name: string; enabled: boolean }> = []
       const seen = new Set<string>()
       for (const rec of new Set(Object.values(inst))) {
         let owner = rec.owner
@@ -2532,7 +2547,15 @@ export class ZatMarketGateway extends TypertRemoteService {
           const known = Object.entries(KNOWN_MARKET_REPOS).find(([, pkg]) => pkg === rec.name)
           if (known) { const [full] = known; owner = full.split('/')[0]; repo = full.split('/')[1] }
         }
-        if (!owner || !repo) continue // link:/unknown sources have no market card
+        if (!owner || !repo) {
+          // 纯 npm / link 安装:没有 GitHub 仓库地址,也要在"已安装"里看到和管理。
+          if (rec.name.startsWith('@deepseek-ai/')) continue // 官方组件不在这里列
+          const bare = rec.name.replace(/^@[\w.-]+\//, '')
+          if (seen.has('npm:' + bare.toLowerCase())) continue
+          seen.add('npm:' + bare.toLowerCase())
+          noRepo.push({ name: rec.name, enabled: rec.enabled })
+          continue
+        }
         const key = (owner + '/' + repo).toLowerCase()
         if (key === SELF_REPO) continue // the market's own card stays hidden
         if (seen.has(key)) continue
@@ -2551,6 +2574,33 @@ export class ZatMarketGateway extends TypertRemoteService {
         unique.push({ name: fullName, owner: task.subject.owner, repo: task.subject.repo, enabled: false, installing: true, taskId })
       }
       const items: JsonObject[] = []
+      // 无仓库地址的插件:直接用包名列出,支持卸载/启停,不支持更新/点星/详情。
+      for (const rec of noRepo) {
+        const version = await this.localVersion(rec.name)
+        items.push({
+          fullName: rec.name,
+          owner: '',
+          name: rec.name,
+          description: '',
+          zhIntro: '',
+          needZh: false,
+          stars: 0,
+          forks: 0,
+          language: '',
+          topics: [],
+          updatedAt: '',
+          htmlUrl: '',
+          homepage: '',
+          installed: rec.enabled,
+          installedName: rec.name,
+          installedVersion: version,
+          isHarness: false,
+          disabled: !rec.enabled,
+          kind: 'plugin',
+          noRepo: true,
+          cover: '',
+        })
+      }
       let next = 0
       const worker = async (): Promise<void> => {
         while (next < unique.length) {

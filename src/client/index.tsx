@@ -51,6 +51,8 @@ interface MarketItem {
   installing?: boolean
   /** Background task id to poll for live progress. */
   taskId?: string
+  /** Installed from npm/link with no GitHub repo address (no update/star/detail). */
+  noRepo?: boolean
 }
 
 interface MarketListResult {
@@ -881,6 +883,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   function openDetail(item: MarketItem): void {
     setDetail(item)
     setDetailData(null)
+    if (item.noRepo) return // npm/link install: no repo to fetch details from
     void pm.detail(item.owner, item.name).then((res) => {
       if (!res.ok || !res.value.ok) { setDetailData(null); return }
       setDetailData(res.value)
@@ -912,7 +915,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         : detail.installed && detail.hasUpdate
           ? <button className="zat-btn zat-update" onClick={() => doUpdate(detail)} disabled={!!installing}>{installing ? t('更新中…', 'Updating…') : `↑ ${t('更新到 v', 'Update to v')}${detail.latestVersion || ''}`}</button>
           : detail.installed
-            ? <button className="zat-btn zat-installed" disabled>✓ {t('已是最新', 'Up to date')}</button>
+            ? <button className="zat-btn zat-installed" disabled>✓ {detail.noRepo ? t('已安装', 'Installed') : t('已是最新', 'Up to date')}</button>
             : null
     return (
       <div className="zat-panel">
@@ -927,17 +930,34 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           </div>
         )}
         <div className="zat-detail">
-          <div className="zat-dcover"><img src={detail.cover} onError={(e) => { e.currentTarget.style.display = 'none' }} alt={detail.name} /></div>
+          <div className="zat-dcover">{detail.noRepo
+            ? <div className="zat-coverfallback">{String(detail.name || '?').slice(0, 1).toUpperCase()}</div>
+            : <img src={detail.cover} onError={(e) => { e.currentTarget.style.display = 'none' }} alt={detail.name} />}</div>
           <div className="zat-dtitle">{detail.name}</div>
           <div className="zat-downer">{detail.fullName}</div>
-          <div className="zat-dstats">
-            <span>⭐ {formatStars(detail.stars)} stars</span>
-            <span>⑂ {formatStars(detail.forks)} forks</span>
-            {detail.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[detail.language] || '#8b949e' }} /> {detail.language}</span>}
-            <span>{t('更新 ', 'Updated ')}{String(detail.updatedAt || '').slice(0, 10)}</span>
-            {(detail.installed || detail.disabled) && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
-            {detail.hasUpdate && detail.latestVersion && <span className="zat-ver">{t('最新 v', 'Latest v')}{detail.latestVersion}</span>}
-          </div>
+          {detail.noRepo && (
+            <div className="zat-subchoices">
+              <div className="zat-subchoices-title">
+                {t('这个插件是 npm/本地直接安装的,没有 GitHub 仓库地址,不支持更新、点星和查看仓库详情;可以在这里卸载或停用。', 'This plugin was installed from npm or locally with no GitHub repo, so update, star and repo detail are unavailable — you can uninstall or disable it here.')}
+              </div>
+            </div>
+          )}
+          {detail.noRepo
+            ? (
+              <div className="zat-dstats">
+                {(detail.installed || detail.disabled) && detail.installedVersion && <span className="zat-ver">{t('已装 v', 'v')}{detail.installedVersion}</span>}
+              </div>
+            )
+            : (
+              <div className="zat-dstats">
+                <span>⭐ {formatStars(detail.stars)} stars</span>
+                <span>⑂ {formatStars(detail.forks)} forks</span>
+                {detail.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[detail.language] || '#8b949e' }} /> {detail.language}</span>}
+                <span>{t('更新 ', 'Updated ')}{String(detail.updatedAt || '').slice(0, 10)}</span>
+                {(detail.installed || detail.disabled) && detail.installedVersion && <span className={'zat-ver' + (detail.hasUpdate ? ' zat-verold' : '')}>{t('已装 v', 'v')}{detail.installedVersion}</span>}
+                {detail.hasUpdate && detail.latestVersion && <span className="zat-ver">{t('最新 v', 'Latest v')}{detail.latestVersion}</span>}
+              </div>
+            )}
           {detail.isHarness && (
             <div className="zat-summary">
               <span className="zat-zhlabel">{t('DeepSeek Harness 本体:', 'DeepSeek Harness itself:')}</span>
@@ -966,9 +986,9 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           )}
           {ddesc && <div className="zat-summary"><span className="zat-zhlabel">{t('简介:', 'About:')}</span>{ddesc}</div>}
           {detail.topics && detail.topics.length > 0 && <div className="zat-topics">{detail.topics.map((tp) => <span key={tp} className="zat-topic">#{tp}</span>)}</div>}
-          {dd
+          {!detail.noRepo && (dd
             ? <div className="zat-summary"><span className="zat-zhlabel">{t('README 摘要:', 'README:')}</span>{String(dd.summary || t('该仓库暂无 README 摘要', 'No README summary')).slice(0, 1200)}</div>
-            : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>}
+            : <div className="zat-status">{t('正在读取 README 简介…', 'Loading README…')}</div>)}
           <div className="zat-actions">
             {mainBtn}
             {detail.disabled && !detail.isHarness && (
@@ -982,7 +1002,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
               </button>
             )}
             {(detail.installed || detail.disabled) && !detail.isHarness && <button className="zat-btn zat-danger" onClick={() => doUninstall(detail)} disabled={!!installing}>{t('卸载插件', 'Uninstall')}</button>}
-            <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>
+            {!detail.noRepo && <a className="zat-btn" href={detail.htmlUrl} target="_blank" rel="noreferrer">{t('在 GitHub 查看 ↗', 'View on GitHub ↗')}</a>}
           </div>
           {notice && <div className="zat-notice">{notice}</div>}
         </div>
@@ -1207,9 +1227,10 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
   return (
     <div className="zat-card" onClick={() => onOpen(item)}>
       <div className="zat-cover">
-        {coverErr
+        {(coverErr || item.noRepo)
           ? <div className="zat-coverfallback">{String(item.name || '?').slice(0, 1).toUpperCase()}</div>
           : <img src={item.cover} loading="lazy" onError={() => setCoverErr(true)} alt={item.name} />}
+        {item.noRepo && <span className="zat-kindbadge zat-kind-nonplugin">{zh ? 'npm/本地' : 'npm/local'}</span>}
         {item.kind === 'skill' && <span className="zat-kindbadge zat-kind-skill">{zh ? '技能' : 'Skill'}</span>}
         {item.kind === 'nonplugin' && <span className="zat-kindbadge zat-kind-nonplugin">{zh ? '非插件' : 'Not a plugin'}</span>}
         {item.kind === 'multi' && <span className="zat-kindbadge zat-kind-multi">{zh ? '多插件' : 'Multi'}</span>}
@@ -1225,13 +1246,15 @@ function MarketCard({ item, zh, t, installing, progress, taskProgress, onOpen, o
         <div className="zat-owner">{item.fullName}</div>
         <div className="zat-desc">{desc}</div>
         <div className="zat-meta">
-          <span
-            className={'zat-star' + (item.starred ? '' : ' zat-staroff')}
-            title={item.starred ? t('已星标,点击取消', 'Starred — click to unstar') : t('点击星标', 'Click to star')}
-            onClick={(e) => { e.stopPropagation(); onStar(item) }}
-          >
-            {item.starred ? '★' : '☆'} {formatStars(item.stars)}
-          </span>
+          {!item.noRepo && (
+            <span
+              className={'zat-star' + (item.starred ? '' : ' zat-staroff')}
+              title={item.starred ? t('已星标,点击取消', 'Starred — click to unstar') : t('点击星标', 'Click to star')}
+              onClick={(e) => { e.stopPropagation(); onStar(item) }}
+            >
+              {item.starred ? '★' : '☆'} {formatStars(item.stars)}
+            </span>
+          )}
           {item.language && <span><span className="zat-dot" style={{ background: LANG_COLORS[item.language] || '#8b949e' }} /> {item.language}</span>}
           {canDisable(item) && (
             <button

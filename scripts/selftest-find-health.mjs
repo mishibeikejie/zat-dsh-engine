@@ -124,6 +124,11 @@ for (const [code, expectFinding, pattern] of secCases) {
   assert(matched, `安全用例: ${String(code).slice(0, 40)}`)
 }
 
+console.log('\n== 安装拦截:入口文件缺失(DSH-better-sidebar)==')
+const conf = await gw.analyzeCandidateConflicts('omdsh-dev', 'DSH-better-sidebar')
+console.log(`  block: ${conf.block.join(' | ') || '(无)'}`)
+assert(conf.block.some((b) => b.includes('入口文件缺失')), 'DSH-better-sidebar 被安装门拦截(入口文件缺失)')
+
 console.log('\n== 反例:不存在的仓库(期望 status=error)==')
 const neg = await gw.analyzeCandidateHealth('mishibeikejie', 'zat-dsh-engine-does-not-exist-xyz', 'plugin')
 console.log(`  status=${neg.status} summary=${neg.summary}`)
