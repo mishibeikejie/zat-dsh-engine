@@ -29,6 +29,9 @@ Zat-DSH Engine 在 DeepSeek Harness 网页界面的 **设置 → 插件** 里新
 
 ## 安装
 
+> ⚠️ **请用下面的命令安装,不要手动改任何 patch 文件。**
+> 直接把仓库地址丢给 AI、让它手动编辑 `cordis.patch.yml` 会导致 dsh 起不来:市场自带的 `plugin-market` 条目由 dsh 从随包补丁自动挂载,若再手动抄进两个地方(`app.asar.unpacked/cordis.patch.yml` 和 `~/.dsh/profiles/<profile>/cordis.patch.yml`),id 重复,启动直接失败。如果 dsh 已经起不来,删掉你 profile 的 `cordis.patch.yml` 里手抄的 `plugin-market` 那条,再用下面的命令重装即可。
+
 ### 从 GitHub 安装(发布后推荐)
 
 ```sh
@@ -121,6 +124,12 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 以上每一项都是"为了让市场能工作"的最小权限集合;如果审查时看到某个具体行为有疑问,对照本节即可。
 
 ## 更新日志
+
+### v0.6.1
+
+- **移除误加的第三方主题依赖** `@deepseek-ai/dsh-client-ui-aqua`:它强制给每个安装塞进一个未审计的玻璃主题,还触发 pnpm 11 的 exotic-subdep 拦截;市场根本没用它,现在安装干净了
+- **新增:手抄重复挂载行检测** — 体检会报出 profile 的 `cordis.patch.yml` 里、与插件自带补丁同 id 的 `insert` 行(就是"AI 把条目抄进两个 patch 文件"那种翻车),一键修复自动删掉重复行,dsh 又能起来了
+- **安装警告** 写进 README:用 `dsh plugin add` 装,不要手改 patch 文件
 
 ### v0.6.0
 

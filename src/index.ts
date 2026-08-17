@@ -256,7 +256,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.0'
+const SELF_VERSION = '0.6.1'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3551,6 +3551,30 @@ export class ZatMarketGateway extends TypertRemoteService {
           }
         }
       }
+      // 手抄重复:profile 的 cordis.patch.yml 里 insert 的行 id,若已被某个启用
+      // 插件的自带 patch 声明,loader 会对同一 id insert 两次 → id 冲突、dsh 起不来。
+      // (典型:AI 装插件时把插件的 insert 行手抄进 profile patch,插件又自带同 id。)
+      const bundleOwnedIds = new Map<string, string>()
+      for (const s of scanned) {
+        if (!s.enabled) continue
+        for (const id of s.patchIds) {
+          if (!bundleOwnedIds.has(id)) bundleOwnedIds.set(id, s.name)
+        }
+      }
+      for (const patch of await this.readPatches()) {
+        if (!patch || typeof patch !== 'object') continue
+        const insert = (patch as { insert?: unknown }).insert
+        if (!Array.isArray(insert)) continue
+        for (const row of insert) {
+          if (!(row && typeof row === 'object')) continue
+          const rid = (row as { id?: unknown }).id
+          if (typeof rid !== 'string') continue
+          const holder = bundleOwnedIds.get(rid)
+          if (holder) {
+            issues.push({ level: 'error', title: `cordis.patch.yml 手抄了挂载行 id "${rid}"`, detail: `插件 ${holder} 自带的补丁已声明这个 id,loader 会自动挂载;profile 的 cordis.patch.yml 再手抄一遍会导致 id 冲突、dsh 起不来。解决:点「一键修复」自动删掉这条手抄行(插件照常通过自带补丁加载)。`, fixable: true })
+          }
+        }
+      }
       // Shared-dependency major-version conflicts across ENABLED plugins.
       const declared = new Map<string, Array<{ pkg: string; range: string }>>()
       for (const s of scanned) {
@@ -3728,6 +3752,38 @@ export class ZatMarketGateway extends TypertRemoteService {
       for (const name of clientToInsert) {
         await this.upsertClientInsert(name)
         fixed.push(`已注册 ${name}(主题/界面插件,自动写入 cordis.patch.yml)`)
+      }
+      // 1.6) 手抄重复:profile 的 cordis.patch.yml 里 insert 的行 id 若已被某启用
+      // 插件自带 patch 声明,是 id 冲突、会让 dsh 起不来 —— 删掉手抄行,插件照常加载。
+      const ownedIds = await this.installedPatchIds()
+      if (ownedIds.size > 0) {
+        const patches = await this.readPatches()
+        let removedAny = false
+        const removedIds: string[] = []
+        const cleaned = patches.map((patch) => {
+          if (!patch || typeof patch !== 'object') return patch
+          const insert = (patch as { insert?: unknown[] }).insert
+          if (!Array.isArray(insert)) return patch
+          const kept = insert.filter((row) => {
+            if (!(row && typeof row === 'object')) return true
+            const rid = (row as { id?: unknown }).id
+            if (typeof rid === 'string' && ownedIds.has(rid)) { removedIds.push(rid); removedAny = true; return false }
+            return true
+          })
+          ;(patch as { insert: unknown[] }).insert = kept
+          return patch
+        }).filter((patch) => {
+          if (!patch || typeof patch !== 'object') return true
+          const insert = (patch as { insert?: unknown[] }).insert
+          const hasOtherKeys = Object.keys(patch as object).some((k) => k !== 'insert')
+          if (!Array.isArray(insert)) return true
+          if (insert.length === 0 && !hasOtherKeys) return false
+          return true
+        })
+        if (removedAny) {
+          await this.writePatches(cleaned)
+          fixed.push(`已删掉 cordis.patch.yml 里手抄重复的挂载行 id:${[...new Set(removedIds)].join('、')}(插件自带补丁会自动挂载)`)
+        }
       }
       // 2) 缺失的 peer 依赖 / 缺包文件 → pnpm install 一次补全。
       const missingPeers = new Set<string>()

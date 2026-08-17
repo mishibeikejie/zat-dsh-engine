@@ -29,6 +29,9 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 
 ## Installation
 
+> ⚠️ **Install it with the command below — do NOT hand-edit any patch file.**
+> Letting an AI "install" this project by pasting the repo URL and manually editing `cordis.patch.yml` breaks dsh: the market's own `plugin-market` row is auto-mounted by dsh from the bundled patch, and writing it by hand into two places (`app.asar.unpacked/cordis.patch.yml` and `~/.dsh/profiles/<profile>/cordis.patch.yml`) duplicates the id and makes dsh fail to start. If dsh already won't start, delete the hand-written `plugin-market` row from your profile's `cordis.patch.yml` and reinstall with the command below.
+
 ### From GitHub (recommended, after release)
 
 ```sh
@@ -119,6 +122,12 @@ This marketplace is at heart a **package manager**, and that job itself requires
 Each of these is the minimal permission set required for the market to work; if a review questions a specific behavior, this section is the reference.
 
 ## Changelog
+
+### v0.6.1
+
+- **Removed a stray third-party theme dependency** (`@deepseek-ai/dsh-client-ui-aqua`) that was forcing an unaudited glassmorphism theme into every install and triggering pnpm 11's exotic-subdep block — the market never used it, so installs are now clean
+- **New: hand-written duplicate patch row detection** — the health check flags a `plugin-market`-style `insert` id in your profile `cordis.patch.yml` that duplicates a plugin's own bundled patch id (the classic "an AI hand-copied the row into two patch files" failure), and one-click repair removes the duplicate row so dsh starts again
+- **Installation warning** added to the README: use `dsh plugin add`, never hand-edit patch files
 
 ### v0.6.0
 
