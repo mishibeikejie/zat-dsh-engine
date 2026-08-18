@@ -125,8 +125,8 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ### v0.6.2
 
-- **Automatic Chinese translation of new plugins removed**: the 999 bundled Chinese intros still show as before; plugins released after the snapshot keep their English intro instead of being translated on the fly by your current model. With DeepSeek's peak/off-peak pricing, opening the store no longer batch-translates uncached plugins and burns your balance during peak hours
-- **Desktop wrapper profile support (`DSH_DESKTOP_PROFILE`)**: packaged desktop builds (e.g. DeepSeek Harness EAC) run on a dedicated profile like `web-desktop`. The market now resolves the target profile as `DSH_DESKTOP_PROFILE` → `DSH_PROFILE` → scan (still preferring `web`), so one-click install/update/uninstall and every generated command hit the profile the desktop actually loads — no more silently installing into `web` and wondering why nothing works. Follows the convention used by `@sanqi-normal/dsh-webui-market-plugin`
+- **Automatic Chinese translation of new plugins removed**: newer plugins keep their English intro — no model calls, no balance burned during peak hours
+- **Desktop wrapper profile support**: install/update/uninstall now target the profile the desktop actually loads
 
 ### v0.6.1
 

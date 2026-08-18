@@ -127,8 +127,8 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ### v0.6.2
 
-- **移除新插件的自动中文翻译**:内置的 999 条中文简介照常显示;快照之后的新插件保持英文简介,不再用当前模型现场翻译。峰谷定价下,打开商店不会因为批量翻译没缓存的新插件而在高峰时段白烧余额
-- **支持桌面封装端专属 profile(DSH_DESKTOP_PROFILE)**:Deepseek Harness EAC 等桌面封装版跑在 `web-desktop` 这类专属 profile 上。市场现在按 `DSH_DESKTOP_PROFILE` → `DSH_PROFILE` → 扫描(仍优先 `web`)的顺序解析目标 profile,一键安装/更新/卸载以及生成的安装命令都落到桌面端真正加载的 profile,不再装进 `web` 白装。与生态内 `@sanqi-normal/dsh-webui-market-plugin` 的约定一致
+- **移除新插件自动中文翻译**:新插件保持英文简介,不再调用模型翻译,高峰时段不白烧余额
+- **支持桌面封装端专属 profile**:安装/更新/卸载自动落到桌面端真正加载的 profile
 
 ### v0.6.1
 

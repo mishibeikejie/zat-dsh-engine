@@ -2713,7 +2713,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   @Remote('selfupdate')
-  async selfupdate(doUpdate: boolean): Promise<JsonObject> {
+  async selfupdate(doUpdate: boolean, zhLocale?: boolean): Promise<JsonObject> {
     const parts = SELF_REPO.split('/')
     const owner = parts[0]!
     const repo = parts[1]!
@@ -2737,21 +2737,27 @@ export class ZatMarketGateway extends TypertRemoteService {
       // 只有远程严格更新才算更新;本地版本领先(未发布的开发版)绝不提示降级。
       if (!remote || compareVersions(remote, SELF_VERSION) <= 0) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
       // Ship a short "what changed" summary with the update notice: the newest
-      // changelog block from the zh README, capped at a few bullets.
+      // changelog block from the README matching the UI language (中文系统取
+      // README.zh.md,其余取 README.md),只取最新一条版本、最多几条。
       let changes: string[] = []
       try {
-        const readme = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/README.zh.md`)
+        const readmeLang = zhLocale ? 'README.zh.md' : 'README.md'
+        const readme = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${readmeLang}`)
         if (readme.status === 200) {
           const lines = readme.body.split(/\r?\n/)
           let inBlock = false
           for (const line of lines) {
-            if (/^###\s+v/.test(line)) { inBlock = true; continue }
+            const isVersionHeading = /^###\s+v/.test(line)
             if (inBlock) {
-              if (/^##\s/.test(line) || /^###\s+/.test(line)) break
+              // 下一个 `### v…`(或其他标题)表示最新一条已结束:更新介绍只取
+              // 最新版本的条目,不再把旧版本(0.6.1/0.6.0…)也拼进来。
+              if (/^#{2,3}\s/.test(line)) break
               if (line.startsWith('- ')) {
                 changes.push(line.slice(2).trim())
                 if (changes.length >= 6) break
               }
+            } else if (isVersionHeading) {
+              inBlock = true
             }
           }
         }

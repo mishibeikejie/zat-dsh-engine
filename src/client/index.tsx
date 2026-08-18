@@ -87,7 +87,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'pluginMarket/translate': (items: Array<{ fullName: string; description: string }>) => Promise<RemoteResult<{ ok: boolean; map: Record<string, string>; llmUsable: boolean; pending: number }>>
     'pluginMarket/installed': () => Promise<RemoteResult<MarketJson>>
     'pluginMarket/detail': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean; usage?: string[] }>>
-    'pluginMarket/selfupdate': (doUpdate: boolean) => Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
+    'pluginMarket/selfupdate': (doUpdate: boolean, zhLocale?: boolean) => Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
     'pluginMarket/subpackages': (owner: string, repo: string) => Promise<RemoteResult<MarketJson & { kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/installPlugin': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: Array<{ dir: string; name: string; version: string }> }>>
     'pluginMarket/update': (owner: string, repo: string, subdir: string) => Promise<RemoteResult<MarketJson & { version?: string }>>
@@ -133,7 +133,7 @@ interface MarketRemote extends TypertClientRemote {
     translate(items: Array<{ fullName: string; description: string }>): Promise<RemoteResult<{ ok: boolean; map: Record<string, string>; llmUsable: boolean; pending: number }>>
     installed(): Promise<RemoteResult<MarketJson>>
     detail(owner: string, repo: string): Promise<RemoteResult<MarketJson & { summary?: string; isMonorepo?: boolean; usage?: string[] }>>
-    selfupdate(doUpdate: boolean): Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
+    selfupdate(doUpdate: boolean, zhLocale?: boolean): Promise<RemoteResult<MarketJson & { hasUpdate?: boolean; latestVersion?: string }>>
     subpackages(owner: string, repo: string): Promise<RemoteResult<MarketJson & { kind?: string; packages?: MarketSubpackage[] }>>
     installPlugin(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { packageName?: string | null; kind?: string; packages?: MarketSubpackage[] }>>
     update(owner: string, repo: string, subdir: string): Promise<RemoteResult<MarketJson & { version?: string }>>
@@ -184,7 +184,7 @@ const marketDescriptors: InvocationDescriptor[] = [
   desc('translate', ['items']),
   desc('installed', []),
   desc('detail', ['owner', 'repo']),
-  desc('selfupdate', ['doUpdate']),
+  desc('selfupdate', ['doUpdate', 'zhLocale']),
   desc('subpackages', ['owner', 'repo']),
   desc('installPlugin', ['owner', 'repo', 'subdir']),
   desc('update', ['owner', 'repo', 'subdir']),
@@ -671,7 +671,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   // Initial load.
   useEffect(() => {
     load(1, sort, '', category, false)
-    void pm.selfupdate(false).then((r) => {
+    void pm.selfupdate(false, zh).then((r) => {
       if (r.ok && r.value.ok && r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
     }).catch(() => { /* best effort */ })
     void pm.installed().then((r) => {
@@ -1217,7 +1217,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
             onClick={() => {
               if (selfUpdating) return
               setSelfUpdating(true)
-              void pm.selfupdate(true).then((r) => {
+              void pm.selfupdate(true, zh).then((r) => {
                 if (!r.ok) { setSelfUpdating(false); setNotice(r.error.message); return }
                 const value = r.value
                 const taskId = value && typeof value.taskId === 'string' ? value.taskId : ''
