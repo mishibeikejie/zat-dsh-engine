@@ -797,5 +797,6 @@
   "dongsheng123132/dsh-cost": "plugin",
   "dongsheng123132/dsh-release-proof": "plugin",
   "devourerm/dsh-naiwa-theme": "plugin",
-  "perrylink/dsh-plugin-guide": "skill"
+  "perrylink/dsh-plugin-guide": "skill",
+  "tianxia--/dsh-llm-local-token": "client"
 }
