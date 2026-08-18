@@ -123,6 +123,11 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.3
+
+- **Sessions list shows main conversations only**: subagent sessions are hidden from the active/archived lists
+- **Deleting a conversation cascades to its subagents**: subagent descendants are removed together with their parent, leaving no undeletable orphans
+
 ### v0.6.2
 
 - **Automatic Chinese translation of new plugins removed**: newer plugins keep their English intro — no model calls, no balance burned during peak hours

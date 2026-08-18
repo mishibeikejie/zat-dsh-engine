@@ -230,7 +230,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.2'
+const SELF_VERSION = '0.6.3'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3019,8 +3019,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   // ── conversation management (delete sessions) ──────────────────────────
 
   /** Soft faces: the session panel degrades gracefully where services differ. */
-  private get persistenceFace(): { list(): Promise<Array<{ id: string; createdAt: number; origin?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined {
-    return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string; createdAt: number; origin?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
+  private get persistenceFace(): { list(): Promise<Array<{ id: string; createdAt: number; origin?: string; parentSession?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined {
+    return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string; createdAt: number; origin?: string; parentSession?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
   }
 
   private get workspaceRegistryFace(): { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined {
@@ -3087,8 +3087,11 @@ export class ZatMarketGateway extends TypertRemoteService {
           inWorkspace: workspaces.some((w) => (w.sessionIds as readonly string[]).includes(h.id)),
         })
       }
-      sessions.sort((a, b) => Number(b.createdAt) - Number(a.createdAt))
-      return { ok: true, sessions }
+      // 对话管理只显示主对话:子代理会话直接隐藏(它们独立于主对话上下文,
+      // 不应出现在这里、也不该被误删;删除子代理的硬保护仍保留在 deleteSession)。
+      const mains = sessions.filter((s) => !s.subagent)
+      mains.sort((a, b) => Number(b.createdAt) - Number(a.createdAt))
+      return { ok: true, sessions: mains }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
@@ -3157,7 +3160,13 @@ export class ZatMarketGateway extends TypertRemoteService {
           }
         } catch { /* best effort — a cold delete still works */ }
       }
-      return { ok: true, message: `已删除会话 ${id}${warning ? '。' + warning : ''}` }
+      // 级联删除:主会话的子代理后代一并删掉,避免留下"隐藏又删不掉"的无主孤儿。
+      let removedDescendants = 0
+      for (const d of await this.subagentDescendants(id)) {
+        await this.purgeSubagent(d.id, d.header)
+        removedDescendants++
+      }
+      return { ok: true, message: `已删除会话 ${id}${removedDescendants > 0 ? ` 及其 ${removedDescendants} 个子代理` : ''}${warning ? '。' + warning : ''}` }
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
@@ -3175,6 +3184,69 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
     }
     return '此版本 dsh 缺少清理归档记录的方法,归档集合里可能残留一条记录(不影响使用)'
+  }
+
+  /** 收集某主会话的全部子代理后代(按 parentSession 链,含孙辈)。只跟子代理节点,不动 fork 等普通子会话。 */
+  private async subagentDescendants(rootId: string): Promise<Array<{ id: string; header: { id: string; origin?: string } }>> {
+    const persistence = this.persistenceFace
+    if (!persistence) return []
+    const headers = await persistence.list()
+    const childrenOf = new Map<string, Array<{ id: string; header: { id: string; origin?: string } }>>()
+    for (const h of headers) {
+      if (h.origin !== 'subagent') continue
+      const pid = h.parentSession
+      if (!pid) continue
+      const list = childrenOf.get(pid) ?? []
+      list.push({ id: h.id, header: h })
+      childrenOf.set(pid, list)
+    }
+    const out: Array<{ id: string; header: { id: string; origin?: string } }> = []
+    const seen = new Set<string>([rootId])
+    const queue = [...(childrenOf.get(rootId) ?? [])]
+    while (queue.length) {
+      const node = queue.shift()!
+      if (seen.has(node.id)) continue
+      seen.add(node.id)
+      out.push(node)
+      for (const child of childrenOf.get(node.id) ?? []) queue.push(child)
+    }
+    return out
+  }
+
+  /** 删除一个子代理会话(文件 + 记账 + 内存),尽力而为,单个失败不中断级联。 */
+  private async purgeSubagent(id: string, header: { id: string; origin?: string }): Promise<void> {
+    const agents = this.agentsFace
+    const agent = agents ? agents.get(id) : undefined
+    if (agent !== undefined) {
+      try {
+        if (agent.ctx && typeof agent.ctx.dispose === 'function') agent.ctx.dispose()
+      } catch { /* 继续删文件/记账 */ }
+    }
+    const persistence = this.persistenceFace
+    const location = persistence ? persistence.locate(header) : undefined
+    if (location !== undefined) {
+      try { rmSync(dirname(location.path), { recursive: true, force: true }) } catch { /* 文件删不动不阻塞 */ }
+    }
+    const registry = this.workspaceRegistryFace
+    if (registry !== undefined) await this.forgetSessionCompat(registry, id)
+    try {
+      const domain = this.storageDomainFace?.get('session_projcache')
+      if (domain) await domain.table('sessions').delete(id)
+    } catch { /* 残留缓存行无害 */ }
+    const sessionsStore = this.ctx.get('sessions') as { get(sessionId: string): unknown; store?: Map<string, unknown> } | undefined
+    const liveSession = sessionsStore ? sessionsStore.get(id) : undefined
+    if (liveSession !== undefined && sessionsStore?.store !== undefined) {
+      try {
+        sessionsStore.store.delete(id)
+        ;(this.ctx as unknown as { emit(event: string, payload: unknown): void }).emit('session/disposed', liveSession)
+        const agentsRegistry = this.ctx.get('agents') as { get(sessionId: string): unknown; store?: Map<string, unknown> } | undefined
+        const liveAgent = agentsRegistry ? agentsRegistry.get(id) : undefined
+        if (liveAgent !== undefined && agentsRegistry?.store !== undefined) {
+          agentsRegistry.store.delete(id)
+          ;(this.ctx as unknown as { emit(event: string, payload: unknown): void }).emit('agent/disposed', liveAgent)
+        }
+      } catch { /* best effort */ }
+    }
   }
 
   /**
