@@ -580,7 +580,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       const t = token
       setTimeout(() => {
         if (t !== loadTokenRef.current) return
-        requestZh(data.items)
         requestVersions(data.items)
       }, 1500)
       // 真实数据(非快照)到达时,重置快照重试计数。
@@ -633,7 +632,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setInstalledMode(true)
       // 延迟再发 zh/版本检测,别和"已安装"主流程抢 RPC 队列。
       setTimeout(() => {
-        requestZh(data.items)
         requestVersions(data.items)
       }, 1500)
       // Resume watching any in-flight installs so their cards show progress
@@ -645,18 +643,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       setLoading(false)
       setError(String((err as { message?: string })?.message || err))
     })
-  }
-
-  function requestZh(list: MarketItem[]): void {
-    if (!zh) return
-    // 全量列表可能有上千条,单次最多翻译前 100 个未缓存的,避免 LLM 风暴;缓存会留存,下次自动补。
-    const needZh = list.filter((it) => it.needZh).slice(0, 100).map((it) => ({ fullName: it.fullName, description: it.description || '' }))
-    if (!needZh.length) return
-    void pm.translate(needZh).then((tr) => {
-      if (tr.ok && tr.value.ok && tr.value.map) {
-        setItems((prev) => prev ? prev.map((it) => tr.value.map[it.fullName] ? { ...it, zhIntro: tr.value.map[it.fullName]!, needZh: false } : it) : prev)
-      }
-    }).catch(() => { /* best effort */ })
   }
 
   function requestVersions(list: MarketItem[]): void {

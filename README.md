@@ -12,7 +12,7 @@ Zat-DSH Engine adds a **Plugin Market** tab to **Settings → Plugins** in the D
 - **AI plugin finder** — in any conversation just say what you need (e.g. "find me a plugin that lets the model see images") and the AI searches the market, recommends candidates, and reports each one's **pre-install health + security scan** (✅/⚠️/❌) — problems are reported honestly, nothing is blindly recommended
 - **12 categories** — Theme, Tools, Browser, Skills, Vision, Network, Agents, Data, Hardware, Design, Security…
 - **Live search** — type to filter, no Enter key needed; clearing the box returns to the full list
-- **Bilingual intros** — 999 pre-translated Chinese intros bundled; new plugins are translated on the fly by your current model; English UI shows the original GitHub description
+- **Bilingual intros** — 999 pre-translated Chinese intros bundled; new plugins keep their English intro (on-the-fly model translation is removed — with peak/off-peak pricing, mass-translating on store open could burn your balance); English UI shows the original GitHub description
 - **Install / Update / Uninstall** — one click, powered by the official `dsh plugin` profile mechanism (`pnpm` under the hood)
 - **Monorepo-aware install** — repositories that bundle several plugins install correctly: a single-plugin repo installs silently, multi-plugin repos offer a plain-language picker
 - **Installed detection** — marks plugins you already have, with version comparison and an **update badge** when a newer version is released
@@ -89,7 +89,7 @@ dsh plugin --profile web remove zat-dsh-engine
 
 **The market shows at most 1000 plugins in the All view.** GitHub's search API caps any query at 1000 results. Search and category filters reach every plugin regardless.
 
-**Why do I need a model for Chinese intros?** 999 intros ship with the plugin. Only plugins released after the snapshot are translated on the fly, using the model you selected in dsh.
+**Why do some plugins have no Chinese intro?** 999 Chinese intros ship with the plugin. Plugins released after the snapshot keep their English description — live on-the-fly translation is removed, because with DeepSeek's peak/off-peak pricing, opening the store used to batch-translate every uncached plugin with your current model and burn your balance during peak hours.
 
 **Is the mirror safe?** The mirror is only used when a direct GitHub request fails, and only for public repository metadata.
 
@@ -122,6 +122,11 @@ This marketplace is at heart a **package manager**, and that job itself requires
 Each of these is the minimal permission set required for the market to work; if a review questions a specific behavior, this section is the reference.
 
 ## Changelog
+
+### v0.6.2
+
+- **Automatic Chinese translation of new plugins removed**: the 999 bundled Chinese intros still show as before; plugins released after the snapshot keep their English intro instead of being translated on the fly by your current model. With DeepSeek's peak/off-peak pricing, opening the store no longer batch-translates uncached plugins and burns your balance during peak hours
+- **Desktop wrapper profile support (`DSH_DESKTOP_PROFILE`)**: packaged desktop builds (e.g. DeepSeek Harness EAC) run on a dedicated profile like `web-desktop`. The market now resolves the target profile as `DSH_DESKTOP_PROFILE` → `DSH_PROFILE` → scan (still preferring `web`), so one-click install/update/uninstall and every generated command hit the profile the desktop actually loads — no more silently installing into `web` and wondering why nothing works. Follows the convention used by `@sanqi-normal/dsh-webui-market-plugin`
 
 ### v0.6.1
 

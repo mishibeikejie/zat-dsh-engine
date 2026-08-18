@@ -174,32 +174,6 @@ interface SubprocessFace {
   }): SpawnHandle
 }
 
-interface LlmChunk {
-  type?: string
-  text?: string
-}
-
-interface LlmFace {
-  listProviders(): unknown
-  stream(opts: {
-    provider: string
-    model: string
-    messages: unknown
-    system: string
-    maxTokens: number
-    temperature: number
-  }): AsyncIterable<LlmChunk>
-}
-
-interface ModelSelection {
-  provider: string
-  model: string
-}
-
-interface ModelSelectionFace {
-  currentSelection(): { provider?: string; model?: string } | undefined
-}
-
 interface ZhEntry {
   at?: number
   zh?: string
@@ -256,7 +230,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.1'
+const SELF_VERSION = '0.6.2'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -527,7 +501,6 @@ export class ZatMarketGateway extends TypertRemoteService {
   static inject = ['subprocess']
 
   private readonly subprocess: SubprocessFace
-  private readonly llm: LlmFace | undefined
 
   private home: string | null = null
   private profileDirValue: string | null = null
@@ -541,7 +514,6 @@ export class ZatMarketGateway extends TypertRemoteService {
   private mirrorDown = false
   private directDown = false
   private zhLoaded = false
-  private llmUsable: boolean | null = null
 
   private readonly caches = new Map<string, { at: number; data: unknown }>()
   private readonly zhCache = new Map<string, { at: number; zh: string }>()
@@ -560,7 +532,6 @@ export class ZatMarketGateway extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'pluginMarket')
     this.subprocess = this.ctx.get('subprocess') as unknown as SubprocessFace
-    this.llm = this.ctx.get('llm') as unknown as LlmFace | undefined
     // Agent tool: the model can discover plugins by describing a need, then
     // hand the user an install command — the same data the market uses.
     const tools = this.ctx.get('tools') as unknown as { register(definition: unknown): () => void } | undefined
@@ -729,6 +700,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           }))
           healths.push(...results)
         }
+        const profileName = await this.profileForCommand()
         const items = picked.map((it, i) => {
           const kind = this.kindOf(it.fullName.toLowerCase())
           const cachedZh = this.zhCache.get(it.fullName.toLowerCase())
@@ -742,7 +714,7 @@ export class ZatMarketGateway extends TypertRemoteService {
             kind,
             installable,
             install: kind === 'plugin'
-              ? `dsh plugin --profile web add github:${it.fullName}`
+              ? `dsh plugin --profile ${profileName} add github:${it.fullName}`
               : kind === 'client'
                 ? '在插件市场点「安装」一键装(主题/界面插件,刷新页面生效)'
                 : kind === 'skill'
@@ -1696,11 +1668,30 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.home
   }
 
+  /**
+   * 桌面封装端(如 Deepseek Harness EAC)跑在专属 profile(如 web-desktop)上,
+   * 通过环境变量 DSH_DESKTOP_PROFILE 导出其 profile 名(生态惯例,见
+   * @sanqi-normal/dsh-webui-market-plugin);原生 CLI/web 不设置它,回退 DSH_PROFILE。
+   * 两者取值都做格式校验(防路径穿越/空白)。见 issue #6。
+   */
+  private envProfileName(): string | null {
+    for (const key of ['DSH_DESKTOP_PROFILE', 'DSH_PROFILE']) {
+      const v = process.env[key]
+      if (v && /^[A-Za-z0-9_-]+$/.test(v.trim())) return v.trim()
+    }
+    return null
+  }
+
+  /** 给用户看的 `dsh plugin --profile <名>` 命令里用的 profile 名;探测失败回退 web,仅影响展示文案。 */
+  private async profileForCommand(): Promise<string> {
+    try { return await this.getProfileName() } catch { return 'web' }
+  }
+
   private async getProfileName(): Promise<string> {
     if (this.profileNameValue) return this.profileNameValue
-    const envProfile = process.env.DSH_PROFILE
-    if (envProfile && envProfile.trim()) {
-      this.profileNameValue = envProfile.trim()
+    const envProfile = this.envProfileName()
+    if (envProfile) {
+      this.profileNameValue = envProfile
       return this.profileNameValue
     }
     const h = await this.getHome()
@@ -2136,61 +2127,6 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch { /* cache write is best-effort */ }
   }
 
-  private modelSelection(): ModelSelection {
-    try {
-      const adm = this.ctx.get('agentDefaultModel') as unknown as ModelSelectionFace | undefined
-      if (adm && typeof adm.currentSelection === 'function') {
-        const sel = adm.currentSelection()
-        if (sel && sel.provider && sel.model) return { provider: sel.provider, model: sel.model }
-      }
-    } catch { /* fall through */ }
-    return { provider: 'deepseek-official', model: 'deepseek-v4-pro' }
-  }
-
-  private checkLlmUsable(): boolean {
-    if (this.llmUsable !== null) return this.llmUsable
-    if (!this.llm) { this.llmUsable = false; return false }
-    try {
-      const providers = this.llm.listProviders()
-      const sel = this.modelSelection()
-      this.llmUsable = Array.isArray(providers)
-        && providers.some((p) => (p as { id?: string } | null)?.id === sel.provider)
-    } catch { this.llmUsable = false }
-    return this.llmUsable
-  }
-
-  private async translateBatch(batch: Array<{ fullName: string; description: string }>): Promise<Record<string, string>> {
-    if (!this.llm || !this.checkLlmUsable()) return {}
-    const sel = this.modelSelection()
-    const lines = batch.map((it, i) => `${i}. ${it.fullName}\n   简介: ${(it.description || '').slice(0, 200) || '(无描述,请根据名称判断用途)'}`).join('\n')
-    const system = '你是插件市场的文案编辑。为下列每个插件写一句中文简介,要求:1) 20~40字,一句话,直白说清这个插件是干什么的、对用户有什么用;2) 面向普通用户,避免堆砌英文术语,必要的专有名词保留;3) 只输出一个 JSON 对象,键是序号,值是中文简介,不要任何解释、注释或代码块。'
-    const messages = [{ id: 'zat-zh-batch', role: 'user', content: [{ type: 'text', text: lines }], source: { kind: 'user' } }]
-    try {
-      let out = ''
-      for await (const chunk of this.llm.stream({ provider: sel.provider, model: sel.model, messages, system, maxTokens: 1200, temperature: 0.3 })) {
-        if (chunk && chunk.type === 'text-delta' && chunk.text) out += chunk.text
-      }
-      let json: JsonObject | null = null
-      try {
-        json = JSON.parse(out.replace(/```json|```/g, '').trim()) as JsonObject
-      } catch {
-        const m = (out || '').match(/\{[\s\S]*\}/)
-        if (m) { try { json = JSON.parse(m[0]) as JsonObject } catch { /* ignore */ } }
-      }
-      const result: Record<string, string> = {}
-      if (json && typeof json === 'object') {
-        for (let i = 0; i < batch.length; i++) {
-          const v = json[String(i)] ?? json[i]
-          if (typeof v === 'string' && v.trim()) result[batch[i].fullName] = v.trim().slice(0, 80)
-        }
-      }
-      return result
-    } catch {
-      this.llmUsable = false
-      return {}
-    }
-  }
-
   private async remoteVersion(owner: string, repo: string, subdir?: string): Promise<string | null> {
     const path = subdir ? `${subdir}/package.json` : 'package.json'
     const r = await this.ghGet(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${path}`)
@@ -2418,7 +2354,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const seed = this.seedList(sortKey, qText, catQuery, inst, pageNum)
       if (seed) {
         if (pageNum === 1) void this.refreshListFromGitHub(cacheKey, sortKey, pageNum, qText, cat, catQuery, query, inst)
-        return { ok: true, items: seed.items, total: seed.total, hasMore: pageNum * 100 < seed.total, page: pageNum, llmUsable: this.checkLlmUsable(), source: 'seed' }
+        return { ok: true, items: seed.items, total: seed.total, hasMore: pageNum * 100 < seed.total, page: pageNum, llmUsable: false, source: 'seed' }
       }
       return await this.fetchListPage(cacheKey, sortKey, pageNum, qText, cat, catQuery, query, inst)
     } catch (err) {
@@ -2459,7 +2395,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       total: json.total_count || 0,
       hasMore: pageNum * 100 < (json.total_count || 0),
       page: pageNum,
-      llmUsable: this.checkLlmUsable(),
+      llmUsable: false,
       source: this.directDown ? 'mirror' : 'direct',
     }
     // 后台刷新期间用户装了/卸了插件:丢弃,不写缓存,避免旧安装状态回写。
@@ -2612,44 +2548,19 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   @Remote('translate')
   async translate(items: Array<{ fullName?: string; description?: string }>): Promise<{ ok: boolean; map: Record<string, string>; llmUsable: boolean; pending: number }> {
+    // 自动翻译(LLM 现场生成中文简介)已移除:DeepSeek 峰谷定价下,高峰时段打开
+    // 市场会对"没有缓存中文简介"的新插件批量调用当前模型,白烧大量余额。
+    // 这里只返回已有缓存(内置快照 + 用户本地缓存),新插件保持英文简介、不再翻译。
     const list = Array.isArray(items) ? items : []
     const map: Record<string, string> = {}
     await this.loadZhCache()
-    const pending: Array<{ fullName: string; description: string }> = []
-    const seen: Record<string, boolean> = {}
     for (const it of list) {
       const key = String(it.fullName || '').toLowerCase()
       if (!key) continue
       const cached = this.zhCache.get(key)
-      if (cached && Date.now() - cached.at < ZH_TTL) { map[it.fullName || key] = cached.zh; continue }
-      if (seen[key]) continue
-      seen[key] = true
-      pending.push({ fullName: it.fullName || key, description: it.description || '' })
+      if (cached && Date.now() - cached.at < ZH_TTL) map[it.fullName || key] = cached.zh
     }
-    if (pending.length && this.checkLlmUsable()) {
-      const BATCH = 12
-      const CONCURRENCY = 3
-      const batches: Array<typeof pending> = []
-      for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH))
-      let next = 0
-      const worker = async (): Promise<void> => {
-        while (next < batches.length) {
-          const my = batches[next++]!
-          const res = await this.translateBatch(my)
-          for (const fullName of Object.keys(res)) {
-            const zh = res[fullName]!
-            this.zhCache.set(fullName.toLowerCase(), { at: Date.now(), zh })
-            map[fullName] = zh
-            this.cacheDirty = true
-          }
-        }
-      }
-      const workers: Promise<void>[] = []
-      for (let w = 0; w < Math.min(CONCURRENCY, batches.length); w++) workers.push(worker())
-      await Promise.all(workers)
-      await this.saveZhCache()
-    }
-    return { ok: true, map, llmUsable: this.checkLlmUsable(), pending: pending.length - Object.keys(map).length }
+    return { ok: true, map, llmUsable: false, pending: 0 }
   }
 
   @Remote('installed')
@@ -2864,8 +2775,9 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (alt.outcome.exitCode === 0) r = alt
       }
       if (r.outcome.exitCode !== 0) {
-        this.recordIssue('市场自更新失败', `点更新没成功(网络或 pnpm)。手动一条命令: dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git`)
-        return { ok: false, message: `升级失败。手动一条命令搞定: dsh plugin --profile web add https://gh-proxy.com/https://github.com/${owner}/${repo}.git` }
+        const p = await this.profileForCommand()
+        this.recordIssue('市场自更新失败', `点更新没成功(网络或 pnpm)。手动一条命令: dsh plugin --profile ${p} add https://gh-proxy.com/https://github.com/${owner}/${repo}.git`)
+        return { ok: false, message: `升级失败。手动一条命令搞定: dsh plugin --profile ${p} add https://gh-proxy.com/https://github.com/${owner}/${repo}.git` }
       }
       this.invalidateListCache()
       await this.saveLastKnownGood()
