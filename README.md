@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.8
+
+- **Auto-retry update check**: while the market page is open the check re-runs every 45s, so the update button appears automatically once a new version is published
+
 ### v0.6.7
 
 - **ZAT launcher toolchain support**: the market now reuses the launcher's built-in tools at %TEMP%\zat-tools (node / npm.cmd / PortableGit) whenever they exist — installs work whether or not the machine has them

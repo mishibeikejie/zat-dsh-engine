@@ -125,6 +125,10 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.6.8
+
+- **更新检查自动重查**:市场页打开期间每 45 秒自动重查一次,新版发布后不用刷新,更新按钮也会自动出现
+
 ### v0.6.7
 
 - **兼容 ZAT 启动器内置工具链**:自动复用 %TEMP%\zat-tools 的 node / npm.cmd / PortableGit(存在才用),机器装没装工具都不影响安装

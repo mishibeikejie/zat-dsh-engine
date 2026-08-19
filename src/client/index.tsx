@@ -672,13 +672,19 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   // Initial load.
   useEffect(() => {
     load(1, sort, '', category, false)
-    void pm.selfupdate(false, zh).then((r) => {
-      if (r.ok && r.value.ok) {
-        if (r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
-        else if (r.value.checkFailed) setSelfUpdate({ checkFailed: true })
-        else setSelfUpdate(null)
-      }
-    }).catch(() => { /* best effort */ })
+    const checkSelfUpdate = (): void => {
+      void pm.selfupdate(false, zh).then((r) => {
+        if (r.ok && r.value.ok) {
+          if (r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
+          else if (r.value.checkFailed) setSelfUpdate({ checkFailed: true })
+          else setSelfUpdate(null)
+        }
+      }).catch(() => { /* best effort */ })
+    }
+    checkSelfUpdate()
+    // 市场页开着时每 45 秒自动重查一次:新版发布后不用刷新,按钮也会自动出现
+    // (镜像/CDN 缓存滞后、或刚进页面时网络抖动,都会在下一次重查时被修正)。
+    const updateTimer = setInterval(checkSelfUpdate, 45000)
     void pm.installed().then((r) => {
       if (r.ok && r.value.ok) {
         setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || ''), marketVersion: String(r.value.marketVersion || '') })
@@ -686,7 +692,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     }).catch(() => { /* best effort */ })
     // 星标同步延迟 2s:它走网络(ghApi),别在刚进页面时和列表加载抢队列。
     const starTimer = setTimeout(() => { syncStars() }, 2000)
-    return () => clearTimeout(starTimer)
+    return () => { clearTimeout(starTimer); clearInterval(updateTimer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
