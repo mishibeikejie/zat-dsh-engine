@@ -17,6 +17,7 @@ import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import * as yaml from 'js-yaml'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { spawn as nodeSpawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import bundledZh from '../data/zh-intro.json'
 import bundledKinds from '../data/kinds.json'
@@ -749,18 +750,22 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   /** Spawn one shell command line; returns the live handle for streaming reads. */
   private async spawnShell(command: string, cwd?: string, graceMs = 120000): Promise<SpawnHandle> {
-    let argv: string[]
     if (IS_WIN) {
+      // Windows:node 直接 spawn 隐藏窗口的 PowerShell。DSH 的 subprocess 服务不透传
+      // windowsHide,-WindowStyle Hidden 又会"先建窗再藏"闪一下,所以这里绕开
+      // subprocess 服务,用 node:child_process + windowsHide(CREATE_NO_WINDOW)。
       let exe = 'powershell.exe'
       try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
-      argv = [exe, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command]
-    } else {
-      let sh = '/bin/sh'
-      try { sh = await this.subprocess.resolveExecutable('sh') } catch { /* keep fallback */ }
-      argv = [sh, '-c', command]
+      return this.nodeSpawnHidden([exe, '-NoProfile', '-NonInteractive', '-Command', command], {
+        cwd: cwd || this.shellCwd(),
+        graceMs,
+        stdoutMax: 8 * 1024 * 1024,
+      })
     }
+    let sh = '/bin/sh'
+    try { sh = await this.subprocess.resolveExecutable('sh') } catch { /* keep fallback */ }
     return this.subprocess.spawn({
-      argv,
+      argv: [sh, '-c', command],
       cwd: cwd || this.shellCwd(),
       stdio: { stdin: 'ignore', stdout: { maxBytes: 8 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
       graceMs,
@@ -785,17 +790,44 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!IS_WIN) {
       return this.subprocess.spawn({ argv, cwd, stdio, graceMs: opts.graceMs || 60000 })
     }
-    let exe = 'powershell.exe'
-    try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
-    // 必须用调用运算符 `& `:PS 5.1 里语句以引号字符串开头是"表达式上下文",
-    // `'curl' '--version'` 会被当成两个字符串拼一起而解析失败。
-    const quoted = '& ' + argv.map((a) => "'" + String(a).replace(/'/g, "''") + "'").join(' ')
-    return this.subprocess.spawn({
-      argv: [exe, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', quoted],
-      cwd,
-      stdio,
-      graceMs: opts.graceMs || 60000,
+    // Windows:直接 node spawn + windowsHide,进程不创建任何控制台窗口——
+    // 这是唯一彻底不闪窗的办法(-WindowStyle Hidden 会先闪一下再藏)。
+    return this.nodeSpawnHidden(argv, opts)
+  }
+
+  /** node:child_process 直接 spawn(windowsHide=CREATE_NO_WINDOW),句柄形状与 subprocess 服务一致。 */
+  private nodeSpawnHidden(argv: string[], opts: { cwd?: string; graceMs?: number; stdoutMax?: number; stderrMax?: number; stdin?: string; onStdout?: (text: string) => void; env?: NodeJS.ProcessEnv } = {}): SpawnHandle {
+    const child = nodeSpawn(argv[0]!, argv.slice(1), {
+      cwd: opts.cwd || this.shellCwd(),
+      windowsHide: true,
+      env: opts.env,
+      stdio: [opts.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     })
+    if (opts.stdin !== undefined) {
+      try { child.stdin!.write(opts.stdin); child.stdin!.end() } catch { /* ignore */ }
+    }
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let stdoutLen = 0
+    let stderrLen = 0
+    const stdoutMax = opts.stdoutMax || 16 * 1024 * 1024
+    const stderrMax = opts.stderrMax || 1024 * 1024
+    child.stdout?.on('data', (d: Buffer) => {
+      const room = stdoutMax - stdoutLen
+      if (room > 0) { const slice = d.subarray(0, room); stdoutChunks.push(slice); stdoutLen += slice.length }
+      if (opts.onStdout) opts.onStdout(d.toString('utf8'))
+    })
+    child.stderr?.on('data', (d: Buffer) => {
+      const room = stderrMax - stderrLen
+      if (room > 0) { const slice = d.subarray(0, room); stderrChunks.push(slice); stderrLen += slice.length }
+    })
+    const done = new Promise<{ exitCode: number }>((resolve) => {
+      const timer = setTimeout(() => { try { child.kill() } catch { /* already gone */ } }, opts.graceMs || 60000)
+      child.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code === null ? 1 : code }) })
+      child.on('error', () => { clearTimeout(timer); resolve({ exitCode: 1 }) })
+    })
+    const reader = (chunks: Buffer[]) => ({ readFrom: (offset: number) => ({ text: Buffer.concat(chunks).toString('utf8').slice(offset) }) })
+    return { done, collected: { stdout: reader(stdoutChunks), stderr: reader(stderrChunks) } }
   }
 
   /** Run one shell command line on the host platform. */
@@ -1636,103 +1668,119 @@ export class ZatMarketGateway extends TypertRemoteService {
 
   /**
    * Run a pnpm command with the user's proxy inherited (Windows reads the
-   * system proxy from the registry and exports it; Linux inherits HTTP_PROXY
-   * from the environment naturally). When direct GitHub is known to be down
-   * (this.directDown), the mirror rewrite is applied from the start so users
-   * without a VPN do not burn a doomed direct attempt; otherwise the mirror
-   * retry runs only after the direct attempt fails. The mirror rewrite maps
-   * github.com URLs onto gh-proxy.com through per-process GIT_CONFIG_*
-   * variables, touching no global git configuration.
+   * system proxy from the registry; Linux inherits HTTP_PROXY naturally).
+   * Direct GitHub down → mirror rewrite from the start (no-VPN friendly);
+   * otherwise mirror retry only after the direct attempt fails. The mirror
+   * rewrite maps github.com URLs onto gh-proxy.com through per-process
+   * GIT_CONFIG_* variables, touching no global git configuration.
+   * Windows 上直接 node spawn pnpm(windowsHide=CREATE_NO_WINDOW,绝不弹窗),
+   * 不再经 PowerShell 包装。
    * When onProgress is given, stdout is streamed to it while pnpm runs.
    */
   private async pnpmShell(command: string, dir: string, onProgress?: (accumulatedStdout: string) => void): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
-    const mirrorWin = "$env:GIT_CONFIG_COUNT=1; $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; $env:GIT_CONFIG_VALUE_0='https://github.com/';"
-    const clearWin = 'Remove-Item Env:GIT_CONFIG_COUNT,Env:GIT_CONFIG_KEY_0,Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue;'
-    // 清掉代理环境变量:系统代理开着但 VPN 已关(代理端口已死)时,带代理的所有
-    // 尝试都会失败。清掉后重跑,让"无 VPN → gh-proxy 镜像直连"这条路能走通。
-    const clearProxyWin = 'Remove-Item Env:HTTPS_PROXY,Env:HTTP_PROXY,Env:ALL_PROXY,Env:https_proxy,Env:http_proxy,Env:all_proxy,Env:NO_PROXY,Env:no_proxy -ErrorAction SilentlyContinue;'
-    const mirrorLin = "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; export GIT_CONFIG_VALUE_0='https://github.com/';"
-    const clearLin = 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 2>/dev/null;'
-    // npm 官方源在国内下载慢(几十 KB/s),走 npmmirror 镜像加速依赖下载。
-    const registryWin = "$env:npm_config_registry='https://registry.npmmirror.com';"
-    const registryLin = "export npm_config_registry='https://registry.npmmirror.com';"
-    // `pnpm add/remove` calls come in as "pnpm <verb> …"; on Windows the
-    // spawned -NoProfile PowerShell may not have pnpm on PATH (nvm/corepack
-    // installs). Discover it first, then invoke through the resolved tool.
     const body = command.replace(/^pnpm\s+/, '')
-    let full: string
+    const argvBase = await this.resolvePnpmCommand()
+    if (!argvBase) {
+      const notFound = IS_WIN
+        ? 'pnpm is not recognized as an internal or external command'
+        : 'pnpm: command not found'
+      return { outcome: { exitCode: 127 }, stdout: '', stderr: notFound }
+    }
+    const args = body.split(/\s+/).filter(Boolean).map((a) => a.replace(/^["']|["']$/g, ''))
+    const sep = IS_WIN ? ';' : ':'
+    const baseEnv: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: dirname(process.execPath) + sep + (process.env.PATH || ''),
+      npm_config_registry: 'https://registry.npmmirror.com',
+    }
+    // 启动器对接:zat-tools 的 node 也加入 PATH(若存在)。
+    if (process.env.TEMP) {
+      const ztNode = join(process.env.TEMP, 'zat-tools', 'node.exe')
+      if (existsSync(ztNode)) baseEnv.PATH = dirname(ztNode) + sep + baseEnv.PATH
+    }
+    // 尝试链:① 系统代理+镜像 → ② 清代理+镜像(无 VPN 直连镜像) → ③ 清代理清镜像直连。
+    const a1: Record<string, string | undefined> = { ...baseEnv }
     if (IS_WIN) {
-      const proxySetup = [
-        "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue;",
-        'if($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer){',
-        '  $s=\'\'+$p.ProxyServer;',
-        '  if($s -notmatch \'^https?://\'){ $s=\'http://\'+$s };',
-        '  $env:HTTPS_PROXY=$s; $env:HTTP_PROXY=$s; $env:ALL_PROXY=$s;',
-        '  $env:NO_PROXY=\'localhost,127.0.0.1\';',
-        '};',
-      ].join(' ')
-      const pnpmSetup = [
-        // dsh 自己就跑在 node 上:把宿主 node 目录加进 PATH,让插件构建脚本
-        // (node-pty 等)在没有系统 node 的机器上也能找到 node。
-        '$nodeDir = \'' + dirname(process.execPath) + '\';',
-        'if (Test-Path $nodeDir) { $env:PATH = $nodeDir + \';\' + $env:PATH };',
-        // 与 ZAT 启动器的对接约定(双方只往 %TEMP%\zat-tools 写、不删对方文件,
-        // 固定文件名:node.exe / pnpm.cjs / package-<ver>/):
-        // 启动器保证每次启动 DSH 幂等补齐 zat-tools 的 node 与 pnpm,并把
-        // PNPM_MJS 注入 DSH 进程环境指向 pnpm.cjs——市场直接读,不自己装。
-        '$zatTools = Join-Path $env:TEMP \'zat-tools\';',
-        'if (Test-Path $zatTools) {',
-        '  $ztNode = (Join-Path $zatTools \'node.exe\');',
-        '  if (-not (Test-Path $ztNode)) { $ztNode = Get-ChildItem $zatTools -Filter node.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName };',
-        '  if ($ztNode) { $env:PATH = (Split-Path $ztNode) + \';\' + $env:PATH };',
-        '};',
-        '$pnpm = Get-Command pnpm -ErrorAction SilentlyContinue;',
-        'if (-not $pnpm) {',
-        '  $cands = @();',
-        "  if ($env:PNPM_MJS) { $cands += $env:PNPM_MJS };",
-        '  $cands += (Join-Path $env:TEMP \'zat-tools\\pnpm.cjs\'), (Join-Path $env:TEMP \'zat-tools\\pnpm.exe\'), (Join-Path $env:APPDATA \'npm\\pnpm.cmd\'), (Join-Path $env:LOCALAPPDATA \'pnpm\\pnpm.cmd\'), (Join-Path $env:ProgramFiles \'nodejs\\pnpm.cmd\');',
-        '  $nodeSrc = (Get-Command node -ErrorAction SilentlyContinue).Source;',
-        "  if ($nodeSrc) { $cands += (Join-Path (Split-Path $nodeSrc) 'pnpm.cmd') };",
-        '  $found = $cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;',
-        '  if ($found) {',
-        "    if ($found -like '*.cjs' -or $found -like '*.mjs') { $pnpm = 'node'; $pnpmArgs = $found }",
-        '    else { $env:PATH = (Split-Path $found) + \';\' + $env:PATH; $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue };',
-        '  };',
-        '};',
-        'if (-not $pnpm) { $pnpm = \'corepack\'; $pnpmArgs = \'pnpm\' } else { if (-not $pnpmArgs) { $pnpmArgs = \'\' } };',
-      ].join(' ')
-      const run = '& $pnpm $pnpmArgs ' + body
-      // 三段式兜底,每段换一条路:① 系统代理+gh-proxy 镜像 → ② 清代理+镜像
-      // (VPN 已关/代理端口已死时,gh-proxy 国内直连,这就是"没 VPN 也能装"的路径)
-      // → ③ 清代理+清镜像,直连 github。任一成功即停。
-      full = proxySetup + registryWin + pnpmSetup + mirrorWin + run
-        + '; if ($LASTEXITCODE -ne 0) { ' + clearProxyWin + run
-        + '; if ($LASTEXITCODE -ne 0) { ' + clearWin + run + ' } }'
-    } else {
-      full = 'export PATH="' + dirname(process.execPath) + ':$PATH"; ' + registryLin + mirrorLin + command + ' || { ' + clearLin + command + ' }'
+      const proxy = await this.loadProxy()
+      if (proxy) { a1.HTTPS_PROXY = proxy; a1.HTTP_PROXY = proxy; a1.ALL_PROXY = proxy; a1.NO_PROXY = 'localhost,127.0.0.1' }
     }
-    if (!onProgress) return this.runShell(full, dir)
-    // Streaming variant: poll collected stdout while the command runs.
-    const handle = await this.spawnShell(full, dir)
-    let offset = 0
-    let done = false
-    while (!done) {
-      const settled = await Promise.race([
-        handle.done.then(() => true),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 600)),
-      ])
-      if (handle.collected?.stdout) {
-        const text = handle.collected.stdout.readFrom(offset).text || ''
-        if (text) { offset += text.length; onProgress(text) }
+    a1.GIT_CONFIG_COUNT = '1'
+    a1.GIT_CONFIG_KEY_0 = 'url.https://gh-proxy.com/https://github.com/.insteadOf'
+    a1.GIT_CONFIG_VALUE_0 = 'https://github.com/'
+    const a2: Record<string, string | undefined> = { ...a1 }
+    delete a2.HTTPS_PROXY; delete a2.HTTP_PROXY; delete a2.ALL_PROXY; delete a2.NO_PROXY
+    const a3: Record<string, string | undefined> = { ...a2 }
+    delete a3.GIT_CONFIG_COUNT; delete a3.GIT_CONFIG_KEY_0; delete a3.GIT_CONFIG_VALUE_0
+
+    let last: { outcome: { exitCode: number }; stdout: string; stderr: string } = { outcome: { exitCode: 127 }, stdout: '', stderr: '' }
+    for (const env of [a1, a2, a3]) {
+      const childEnvHandle = this.nodeSpawnHidden([...argvBase, ...args], { cwd: dir, graceMs: 10 * 60 * 1000, onStdout: onProgress, env })
+      const outcome = await childEnvHandle.done
+      let stdout = ''
+      let stderr = ''
+      if (childEnvHandle.collected?.stdout) stdout = childEnvHandle.collected.stdout.readFrom(0).text || ''
+      if (childEnvHandle.collected?.stderr) stderr = childEnvHandle.collected.stderr.readFrom(0).text || ''
+      last = { outcome, stdout, stderr }
+      if (outcome.exitCode === 0) break
+    }
+    return last
+  }
+
+  /** 解析 pnpm 调用前缀(不含命令参数)。Windows 优先直连可执行文件,绝不产生控制台窗口。 */
+  private async resolvePnpmCommand(): Promise<string[] | null> {
+    const pathDirs = (process.env.PATH || '').split(IS_WIN ? ';' : ':')
+    for (const d of pathDirs) {
+      if (!d) continue
+      const exe = join(d, 'pnpm.exe')
+      if (IS_WIN && existsSync(exe)) return [exe]
+      const cmd = join(d, 'pnpm.cmd')
+      if (IS_WIN && existsSync(cmd)) {
+        const via = this.pnpmFromCmdShim(cmd)
+        if (via) return via
       }
-      done = settled
+      const bare = join(d, 'pnpm')
+      if (!IS_WIN && existsSync(bare)) return [bare]
     }
-    const outcome = await handle.done
-    let stdout = ''
-    let stderr = ''
-    if (handle.collected?.stdout) stdout = handle.collected.stdout.readFrom(0).text || ''
-    if (handle.collected?.stderr) stderr = handle.collected.stderr.readFrom(0).text || ''
-    return { outcome, stdout, stderr }
+    const cands: string[] = []
+    if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
+    cands.push(
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
+      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.exe'),
+      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'),
+      join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'),
+      join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd'),
+    )
+    for (const c of cands) {
+      if (!c || !existsSync(c)) continue
+      if (c.endsWith('.cjs') || c.endsWith('.mjs')) return [process.execPath, c]
+      if (c.endsWith('.cmd')) {
+        const via = this.pnpmFromCmdShim(c)
+        if (via) return via
+      }
+      return [c]
+    }
+    if (IS_WIN) {
+      const corepack = join(dirname(process.execPath), 'corepack.cmd')
+      if (existsSync(corepack)) return [corepack, 'pnpm']
+    }
+    return null
+  }
+
+  /** 解析 pnpm.cmd 垫片:优先同目录 pnpm.exe(standalone),否则读垫片里的目标程序。 */
+  private pnpmFromCmdShim(cmdPath: string): string[] | null {
+    const dir = dirname(cmdPath)
+    const exe = join(dir, 'pnpm.exe')
+    if (existsSync(exe)) return [exe]
+    let text = ''
+    try { text = readFileSync(cmdPath, 'utf8') } catch { return null }
+    const m = text.match(/"([^"]*pnpm\.(?:cjs|mjs))"/i) || text.match(/"([^"]*pnpm\.exe)"/i)
+    if (m) {
+      const target = m[1]!.replace(/%~dp0/gi, dir + (IS_WIN ? '\\' : '/')).trim()
+      if (target.endsWith('.cjs') || target.endsWith('.mjs')) return [process.execPath, target]
+      if (target.endsWith('.exe')) return [target]
+    }
+    return null
   }
 
   private async getHome(): Promise<string> {
@@ -1851,9 +1899,17 @@ export class ZatMarketGateway extends TypertRemoteService {
       let cloned = false
       for (const u of urls) {
         // lowSpeedLimit/lowSpeedTime:镜像卡死时 10 秒内放弃;graceMs 30s 兜底 DNS/连接也卡的情况。
-        const res = await this.runShell(`git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 clone --depth 1 --quiet "${u}" "${cloneDir}"`, undefined, 30000)
-        lastErr = String(res.stderr || res.stdout || '').trim()
-        if (res.outcome.exitCode === 0) { cloned = true; break }
+        // 直接 node spawn git(windowsHide),不经 PowerShell 包装,避免弹窗。
+        const handle = await this.winHiddenSpawn(
+          ['git', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=10', 'clone', '--depth', '1', '--quiet', u, cloneDir],
+          { graceMs: 30000 },
+        )
+        const outcome = await handle.done
+        let errText = ''
+        if (handle.collected?.stderr) errText = handle.collected.stderr.readFrom(0).text || ''
+        if (handle.collected?.stdout) errText += handle.collected.stdout.readFrom(0).text || ''
+        lastErr = errText.trim()
+        if (outcome.exitCode === 0) { cloned = true; break }
       }
       if (!cloned) {
         if (/git[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(lastErr)) {
