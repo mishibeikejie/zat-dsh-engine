@@ -238,7 +238,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.9'
+const SELF_VERSION = '0.7.0'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -2890,7 +2890,14 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (!remote) {
         // 版本检查失败(网络/镜像问题)时不再静默:返回 checkFailed,界面显示可见
         // 提示,避免用户以为市场坏了/没有更新(此前 gh-proxy 502 会让按钮静默消失)。
-        return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: null, checkFailed: true }
+        return {
+          ok: true,
+          hasUpdate: false,
+          current: SELF_VERSION,
+          latestVersion: null,
+          checkFailed: true,
+          message: '版本检查失败(GitHub 连接/镜像问题)',
+        }
       }
       if (compareVersions(remote, SELF_VERSION) <= 0) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
       // Ship a short "what changed" summary with the update notice: the newest

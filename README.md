@@ -123,6 +123,12 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.0
+
+- **Fix update button never appearing**: the strict wire manifest missed the optional zhLocale parameter since v0.6.2, so every update check RPC was rejected at the gateway and silently swallowed; now declared and RPC errors surface visibly
+
+
+
 ### v0.6.9
 
 - **Faster, more visible update checks**: failed checks retry after 10s (no more waiting a full cycle); returning to the page re-checks instantly; when up to date the title shows "已是最新 vX.Y.Z"

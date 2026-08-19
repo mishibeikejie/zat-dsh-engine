@@ -424,7 +424,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
   const [detailFailed, setDetailFailed] = useState(false)
   const [notice, setNotice] = useState('')
-  const [selfUpdate, setSelfUpdate] = useState<{ hasUpdate?: boolean; latestVersion?: string; changes?: string[]; checkFailed?: boolean } | null>(null)
+  const [selfUpdate, setSelfUpdate] = useState<{ hasUpdate?: boolean; latestVersion?: string; changes?: string[]; checkFailed?: boolean; checkError?: string } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string; marketVersion?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
@@ -679,12 +679,14 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
           if (r.value.hasUpdate) setSelfUpdate({ hasUpdate: true, latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
           else if (r.value.checkFailed) {
-            setSelfUpdate({ checkFailed: true })
+            setSelfUpdate({ checkFailed: true, checkError: r.value.message || '' })
             // 失败别干等 45 秒:10 秒后自动重试一次(仍失败则靠 45 秒周期兜底)。
             retryTimer = setTimeout(checkSelfUpdate, 10000)
           } else setSelfUpdate({ hasUpdate: false, latestVersion: r.value.latestVersion || undefined })
         } else {
-          setSelfUpdate({ checkFailed: true })
+          // RPC 层失败(网关拒绝/描述符不匹配/服务不可用等)也要可见,不要静默吞掉:
+          // 这类错误和网络失败不同,重试也不会好,必须把真实原因显示出来。
+          setSelfUpdate({ checkFailed: true, checkError: !r.ok ? String(r.error?.message || 'RPC failed') : String(r.value?.message || '') })
           retryTimer = setTimeout(checkSelfUpdate, 10000)
         }
       }).catch(() => {
@@ -1240,7 +1242,14 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           <small>{total ? `${t('共 ', '')}${total}${t(' 个', '')}` : ''}</small>
         </span>
         {selfUpdate && selfUpdate.checkFailed && (
-          <span className="zat-status" title={t('连不上 GitHub,更新检查失败', 'Cannot reach GitHub, update check failed')}>⚠ {t('检查更新失败(网络),稍后重试', 'Update check failed (network), retry later')}</span>
+          <span
+            className="zat-status"
+            title={selfUpdate.checkError
+              ? t('更新检查出错:', 'Update check error:') + selfUpdate.checkError
+              : t('连不上 GitHub,更新检查失败', 'Cannot reach GitHub, update check failed')}
+          >⚠ {selfUpdate.checkError
+            ? t('更新检查出错,稍后重试', 'Update check error, retry later')
+            : t('检查更新失败(网络),稍后重试', 'Update check failed (network), retry later')}</span>
         )}
         {selfUpdate && selfUpdate.hasUpdate && (
           <button
