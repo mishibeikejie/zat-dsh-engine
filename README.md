@@ -126,6 +126,7 @@ Each of these is the minimal permission set required for the market to work; if 
 ### v0.6.6
 
 - **Update check no longer fails silently**: mirror gateway errors (502/503) are no longer treated as definitive answers — the check falls back to direct/proxy routes, and a failed check now shows a visible hint instead of silently hiding the update button
+- **Market version shown in the UI**: the title now displays the current market version (vX.Y.Z), so you can tell at a glance whether you are on the latest
 
 ### v0.6.5
 

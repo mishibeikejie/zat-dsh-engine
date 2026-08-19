@@ -236,6 +236,7 @@ const css = `
 .zat-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:20;background:var(--color-bg1,#121826);padding:4px 2px}
 .zat-title{font-size:15px;font-weight:700;color:var(--color-fg1,#eef1f7);white-space:nowrap}
 .zat-title small{font-size:11px;color:var(--color-fg3,#7c8698);font-weight:400;margin-left:6px}
+.zat-title small.zat-ver{color:#22d3ee;font-weight:700;background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.35);border-radius:6px;padding:1px 6px;margin-left:8px}
 .zat-updbtn{background:linear-gradient(90deg,#0ea5e9,#22d3ee);border:none;color:#fff;font-weight:600;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
 .zat-updbtn:hover{filter:brightness(1.1)}
 .zat-search{flex:1;min-width:160px;display:flex;align-items:center;gap:6px;background:var(--color-bg2,#181d28);border:1px solid var(--color-border,#ffffff14);border-radius:8px;padding:6px 10px}
@@ -425,7 +426,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [notice, setNotice] = useState('')
   const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[]; checkFailed?: boolean } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
-  const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
+  const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string; marketVersion?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
   const [hasToken, setHasToken] = useState<boolean | null>(null)
   const [tokenInput, setTokenInput] = useState('')
@@ -680,7 +681,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     }).catch(() => { /* best effort */ })
     void pm.installed().then((r) => {
       if (r.ok && r.value.ok) {
-        setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || '') })
+        setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || ''), marketVersion: String(r.value.marketVersion || '') })
       }
     }).catch(() => { /* best effort */ })
     // 星标同步延迟 2s:它走网络(ghApi),别在刚进页面时和列表加载抢队列。
@@ -1211,6 +1212,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       <div className="zat-bar">
         <span className="zat-title">
           {t('插件市场', 'Plugin Market')}
+          {profileInfo && profileInfo.marketVersion ? <small className="zat-ver" title={t('市场当前版本', 'Market current version')}>v{profileInfo.marketVersion}</small> : null}
           <small>{total ? `${t('共 ', '')}${total}${t(' 个', '')}` : ''}</small>
         </span>
         {selfUpdate && selfUpdate.checkFailed && (
@@ -1328,7 +1330,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
       </div>
       <div className="zat-foot">
         <span className="zat-count">
-          {profileInfo && profileInfo.profileName ? `${t('当前 profile:', 'Profile: ')}${profileInfo.profileName} · ${profileInfo.profileDir} · ` : ''}
+          {profileInfo && profileInfo.profileName ? `${t('市场 v', 'Market v')}${profileInfo.marketVersion || '?'} · ${t('当前 profile:', 'Profile: ')}${profileInfo.profileName} · ${profileInfo.profileDir} · ` : ''}
           {instFilter !== 'all'
             ? `${t('已显示 ', 'Showing ')}${filtered.length} / ${total}`
             : `${t('已加载 ', 'Loaded ')}${items ? items.length : 0} / ${total}`}{t(' · GitHub 搜索上限 1000', ' · GitHub cap 1000')}

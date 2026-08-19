@@ -2718,6 +2718,7 @@ export class ZatMarketGateway extends TypertRemoteService {
         profileName: await this.getProfileName(),
         home: await this.getHome(),
         profileDir: await this.getProfileDir(),
+        marketVersion: SELF_VERSION,
         bundles: (profile.bundles as string[] | undefined) || [],
         dependencies: (p.dependencies as JsonObject | undefined) || {},
         entries,
