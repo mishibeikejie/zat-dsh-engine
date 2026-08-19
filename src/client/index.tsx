@@ -424,7 +424,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
   const [detailFailed, setDetailFailed] = useState(false)
   const [notice, setNotice] = useState('')
-  const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[]; checkFailed?: boolean } | null>(null)
+  const [selfUpdate, setSelfUpdate] = useState<{ hasUpdate?: boolean; latestVersion?: string; changes?: string[]; checkFailed?: boolean } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string; marketVersion?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
@@ -672,19 +672,32 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   // Initial load.
   useEffect(() => {
     load(1, sort, '', category, false)
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     const checkSelfUpdate = (): void => {
       void pm.selfupdate(false, zh).then((r) => {
         if (r.ok && r.value.ok) {
-          if (r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
-          else if (r.value.checkFailed) setSelfUpdate({ checkFailed: true })
-          else setSelfUpdate(null)
+          if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+          if (r.value.hasUpdate) setSelfUpdate({ hasUpdate: true, latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
+          else if (r.value.checkFailed) {
+            setSelfUpdate({ checkFailed: true })
+            // 失败别干等 45 秒:10 秒后自动重试一次(仍失败则靠 45 秒周期兜底)。
+            retryTimer = setTimeout(checkSelfUpdate, 10000)
+          } else setSelfUpdate({ hasUpdate: false, latestVersion: r.value.latestVersion || undefined })
+        } else {
+          setSelfUpdate({ checkFailed: true })
+          retryTimer = setTimeout(checkSelfUpdate, 10000)
         }
-      }).catch(() => { /* best effort */ })
+      }).catch(() => {
+        setSelfUpdate({ checkFailed: true })
+        retryTimer = setTimeout(checkSelfUpdate, 10000)
+      })
     }
     checkSelfUpdate()
-    // 市场页开着时每 45 秒自动重查一次:新版发布后不用刷新,按钮也会自动出现
-    // (镜像/CDN 缓存滞后、或刚进页面时网络抖动,都会在下一次重查时被修正)。
+    // 市场页开着时每 45 秒自动重查一次;切回页面(visibilitychange)立即重查:
+    // 新版发布后不用刷新,按钮也会自动出现(镜像/CDN 缓存滞后、网络抖动都会被修正)。
     const updateTimer = setInterval(checkSelfUpdate, 45000)
+    const onVisible = (): void => { if (typeof document !== 'undefined' && document.visibilityState === 'visible') checkSelfUpdate() }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
     void pm.installed().then((r) => {
       if (r.ok && r.value.ok) {
         setProfileInfo({ profileName: String(r.value.profileName || ''), profileDir: String(r.value.profileDir || ''), marketVersion: String(r.value.marketVersion || '') })
@@ -692,7 +705,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
     }).catch(() => { /* best effort */ })
     // 星标同步延迟 2s:它走网络(ghApi),别在刚进页面时和列表加载抢队列。
     const starTimer = setTimeout(() => { syncStars() }, 2000)
-    return () => { clearTimeout(starTimer); clearInterval(updateTimer) }
+    return () => {
+      clearTimeout(starTimer)
+      clearInterval(updateTimer)
+      if (retryTimer) clearTimeout(retryTimer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1224,7 +1242,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
         {selfUpdate && selfUpdate.checkFailed && (
           <span className="zat-status" title={t('连不上 GitHub,更新检查失败', 'Cannot reach GitHub, update check failed')}>⚠ {t('检查更新失败(网络),稍后重试', 'Update check failed (network), retry later')}</span>
         )}
-        {selfUpdate && !selfUpdate.checkFailed && (
+        {selfUpdate && selfUpdate.hasUpdate && (
           <button
             className="zat-updbtn"
             disabled={selfUpdating}

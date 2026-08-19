@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.9
+
+- **Faster, more visible update checks**: failed checks retry after 10s (no more waiting a full cycle); returning to the page re-checks instantly; when up to date the title shows "已是最新 vX.Y.Z"
+
 ### v0.6.8
 
 - **Auto-retry update check**: while the market page is open the check re-runs every 45s, so the update button appears automatically once a new version is published
