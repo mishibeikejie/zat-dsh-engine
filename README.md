@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.6
+
+- **Update check no longer fails silently**: mirror gateway errors (502/503) are no longer treated as definitive answers — the check falls back to direct/proxy routes, and a failed check now shows a visible hint instead of silently hiding the update button
+
 ### v0.6.5
 
 - **Popup windows eliminated for good**: every command (pnpm/git/curl/install/update) on Windows is now spawned directly by node with CREATE_NO_WINDOW — no console window is ever created, zero flashes

@@ -238,7 +238,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.5'
+const SELF_VERSION = '0.6.6'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -2066,11 +2066,13 @@ export class ZatMarketGateway extends TypertRemoteService {
     let lastError = ''
     // 镜像优先:这台机器直连 GitHub 被墙、VPN 代理又可能"连着但超时",gh-proxy 镜像
     // 是不依赖 VPN 的稳路。直接 curl 镜像(不走那个可能超时的代理),4s 超时,连不通立刻换直连/代理。
+    // 注意:只有 200 和 404 才算镜像的"确定答案";502/503/504(网关错误)、403/429
+    // (限流/风控)都不是确定答案——直接返回会让自更新检查、列表、详情等静默失败。
     if (!this.mirrorDown) {
       const mr = await this.curlGet(MIRROR + url, null, '4')
       if (mr.status === 200) return mr
-      if (mr.status >= 400) return mr // 404/403 等确定答案:镜像和直连一样,直接返回,不浪费请求
-      lastError = mr.error || ''
+      if (mr.status === 404) return mr
+      lastError = mr.error || ('mirror status ' + mr.status)
       this.mirrorDown = true
     }
     const r = await this.httpGet(url)
@@ -2869,7 +2871,12 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (!doUpdate) {
       const remote = await this.remoteVersion(owner, repo)
       // 只有远程严格更新才算更新;本地版本领先(未发布的开发版)绝不提示降级。
-      if (!remote || compareVersions(remote, SELF_VERSION) <= 0) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
+      if (!remote) {
+        // 版本检查失败(网络/镜像问题)时不再静默:返回 checkFailed,界面显示可见
+        // 提示,避免用户以为市场坏了/没有更新(此前 gh-proxy 502 会让按钮静默消失)。
+        return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: null, checkFailed: true }
+      }
+      if (compareVersions(remote, SELF_VERSION) <= 0) return { ok: true, hasUpdate: false, current: SELF_VERSION, latestVersion: remote }
       // Ship a short "what changed" summary with the update notice: the newest
       // changelog block from the README matching the UI language (中文系统取
       // README.zh.md,其余取 README.md),只取最新一条版本、最多几条。

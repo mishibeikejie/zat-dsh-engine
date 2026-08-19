@@ -423,7 +423,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   const [detailData, setDetailData] = useState<MarketJson | null>(null)
   const [detailFailed, setDetailFailed] = useState(false)
   const [notice, setNotice] = useState('')
-  const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[] } | null>(null)
+  const [selfUpdate, setSelfUpdate] = useState<{ latestVersion?: string; changes?: string[]; checkFailed?: boolean } | null>(null)
   const [subChoices, setSubChoices] = useState<{ owner: string; repo: string; packages: MarketSubpackage[] } | null>(null)
   const [profileInfo, setProfileInfo] = useState<{ profileName?: string; profileDir?: string } | null>(null)
   const [showLegend, setShowLegend] = useState(true)
@@ -672,7 +672,11 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   useEffect(() => {
     load(1, sort, '', category, false)
     void pm.selfupdate(false, zh).then((r) => {
-      if (r.ok && r.value.ok && r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
+      if (r.ok && r.value.ok) {
+        if (r.value.hasUpdate) setSelfUpdate({ latestVersion: r.value.latestVersion, changes: Array.isArray(r.value.changes) ? (r.value.changes as string[]) : undefined })
+        else if (r.value.checkFailed) setSelfUpdate({ checkFailed: true })
+        else setSelfUpdate(null)
+      }
     }).catch(() => { /* best effort */ })
     void pm.installed().then((r) => {
       if (r.ok && r.value.ok) {
@@ -1209,7 +1213,10 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
           {t('插件市场', 'Plugin Market')}
           <small>{total ? `${t('共 ', '')}${total}${t(' 个', '')}` : ''}</small>
         </span>
-        {selfUpdate && (
+        {selfUpdate && selfUpdate.checkFailed && (
+          <span className="zat-status" title={t('连不上 GitHub,更新检查失败', 'Cannot reach GitHub, update check failed')}>⚠ {t('检查更新失败(网络),稍后重试', 'Update check failed (network), retry later')}</span>
+        )}
+        {selfUpdate && !selfUpdate.checkFailed && (
           <button
             className="zat-updbtn"
             disabled={selfUpdating}
