@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.7
+
+- **ZAT launcher toolchain support**: the market now reuses the launcher's built-in tools at %TEMP%\zat-tools (node / npm.cmd / PortableGit) whenever they exist — installs work whether or not the machine has them
+
 ### v0.6.6
 
 - **Update check no longer fails silently**: mirror gateway errors (502/503) are no longer treated as definitive answers — the check falls back to direct/proxy routes, and a failed check now shows a visible hint instead of silently hiding the update button

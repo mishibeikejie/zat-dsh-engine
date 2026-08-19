@@ -238,7 +238,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.6'
+const SELF_VERSION = '0.6.7'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -795,12 +795,32 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.nodeSpawnHidden(argv, opts)
   }
 
+  /** 启动器内置工具链目录(存在才返回,拼进子进程 PATH):%TEMP%\zat-tools 与 %TEMP%\zat-tools\git\cmd。 */
+  private launcherToolPathPrefix(): string {
+    const sep = IS_WIN ? ';' : ':'
+    const parts: string[] = []
+    if (process.env.TEMP) {
+      const zt = join(process.env.TEMP, 'zat-tools')
+      if (existsSync(zt)) parts.push(zt)
+      const ztGit = join(zt, 'git', 'cmd')
+      if (existsSync(ztGit)) parts.push(ztGit)
+    }
+    if (parts.length === 0) return ''
+    return parts.join(sep) + sep
+  }
+
   /** node:child_process 直接 spawn(windowsHide=CREATE_NO_WINDOW),句柄形状与 subprocess 服务一致。 */
   private nodeSpawnHidden(argv: string[], opts: { cwd?: string; graceMs?: number; stdoutMax?: number; stderrMax?: number; stdin?: string; onStdout?: (text: string) => void; env?: NodeJS.ProcessEnv } = {}): SpawnHandle {
+    // Windows 下把启动器工具链(zat-tools 的 node/npm.cmd/PortableGit)与宿主 node
+    // 目录注入子进程 PATH,存在才加:市场不用管机器装没装,装过就用。
+    const childEnv: NodeJS.ProcessEnv = opts.env ? { ...opts.env } : { ...process.env }
+    if (IS_WIN) {
+      childEnv.PATH = this.launcherToolPathPrefix() + dirname(process.execPath) + ';' + (childEnv.PATH || '')
+    }
     const child = nodeSpawn(argv[0]!, argv.slice(1), {
       cwd: opts.cwd || this.shellCwd(),
       windowsHide: true,
-      env: opts.env,
+      env: childEnv,
       stdio: [opts.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     })
     if (opts.stdin !== undefined) {
@@ -1687,16 +1707,11 @@ export class ZatMarketGateway extends TypertRemoteService {
       return { outcome: { exitCode: 127 }, stdout: '', stderr: notFound }
     }
     const args = body.split(/\s+/).filter(Boolean).map((a) => a.replace(/^["']|["']$/g, ''))
-    const sep = IS_WIN ? ';' : ':'
+    // nodeSpawnHidden 会在 Windows 上自动把宿主 node 目录与启动器 zat-tools
+    // (node/npm.cmd/PortableGit)注入 PATH,这里只需补 npm 镜像源。
     const baseEnv: Record<string, string | undefined> = {
       ...process.env,
-      PATH: dirname(process.execPath) + sep + (process.env.PATH || ''),
       npm_config_registry: 'https://registry.npmmirror.com',
-    }
-    // 启动器对接:zat-tools 的 node 也加入 PATH(若存在)。
-    if (process.env.TEMP) {
-      const ztNode = join(process.env.TEMP, 'zat-tools', 'node.exe')
-      if (existsSync(ztNode)) baseEnv.PATH = dirname(ztNode) + sep + baseEnv.PATH
     }
     // 尝试链:① 系统代理+镜像 → ② 清代理+镜像(无 VPN 直连镜像) → ③ 清代理清镜像直连。
     const a1: Record<string, string | undefined> = { ...baseEnv }
@@ -4006,7 +4021,13 @@ export class ZatMarketGateway extends TypertRemoteService {
   /** Ask the local git credential helper for the github.com token — NEVER prompts. */
   private async gitCredentialToken(): Promise<string | null> {
     let git = 'git'
-    try { git = await this.subprocess.resolveExecutable('git') } catch { return null }
+    try { git = await this.subprocess.resolveExecutable('git') } catch { git = '' }
+    // 启动器自举的 PortableGit(机器没装 git 时):%TEMP%\zat-tools\git\cmd\git.exe
+    if (!git && process.env.TEMP) {
+      const ztGit = join(process.env.TEMP, 'zat-tools', 'git', 'cmd', 'git.exe')
+      if (existsSync(ztGit)) git = ztGit
+    }
+    if (!git) return null
     try {
       // credential.interactive=false: 只读已保存的凭据,绝不弹登录窗/浏览器。
       const handle = await this.winHiddenSpawn(
