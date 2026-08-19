@@ -1645,17 +1645,21 @@ export class ZatMarketGateway extends TypertRemoteService {
         // (node-pty 等)在没有系统 node 的机器上也能找到 node。
         '$nodeDir = \'' + dirname(process.execPath) + '\';',
         'if (Test-Path $nodeDir) { $env:PATH = $nodeDir + \';\' + $env:PATH };',
-        // ZAT 启动器自举的资源(市场常由启动器注入,直接复用他的,不重复造):
-        // %TEMP%\zat-tools 下的 node.exe / pnpm.cjs / pnpm.exe,以及 PNPM_MJS。
+        // 与 ZAT 启动器的对接约定(双方只往 %TEMP%\zat-tools 写、不删对方文件,
+        // 固定文件名:node.exe / pnpm.cjs / package-<ver>/):
+        // 启动器保证每次启动 DSH 幂等补齐 zat-tools 的 node 与 pnpm,并把
+        // PNPM_MJS 注入 DSH 进程环境指向 pnpm.cjs——市场直接读,不自己装。
         '$zatTools = Join-Path $env:TEMP \'zat-tools\';',
         'if (Test-Path $zatTools) {',
-        '  $ztNode = Get-ChildItem $zatTools -Filter node.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;',
+        '  $ztNode = (Join-Path $zatTools \'node.exe\');',
+        '  if (-not (Test-Path $ztNode)) { $ztNode = Get-ChildItem $zatTools -Filter node.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName };',
         '  if ($ztNode) { $env:PATH = (Split-Path $ztNode) + \';\' + $env:PATH };',
         '};',
         '$pnpm = Get-Command pnpm -ErrorAction SilentlyContinue;',
         'if (-not $pnpm) {',
-        "  $cands = @((Join-Path $env:APPDATA 'npm\\pnpm.cmd'), (Join-Path $env:LOCALAPPDATA 'pnpm\\pnpm.cmd'), (Join-Path $env:ProgramFiles 'nodejs\\pnpm.cmd'), (Join-Path $env:TEMP 'zat-tools\\pnpm.cjs'), (Join-Path $env:TEMP 'zat-tools\\pnpm.exe'));",
-        '  if ($env:PNPM_MJS) { $cands += $env:PNPM_MJS };',
+        '  $cands = @();',
+        "  if ($env:PNPM_MJS) { $cands += $env:PNPM_MJS };",
+        '  $cands += (Join-Path $env:TEMP \'zat-tools\\pnpm.cjs\'), (Join-Path $env:TEMP \'zat-tools\\pnpm.exe\'), (Join-Path $env:APPDATA \'npm\\pnpm.cmd\'), (Join-Path $env:LOCALAPPDATA \'pnpm\\pnpm.cmd\'), (Join-Path $env:ProgramFiles \'nodejs\\pnpm.cmd\');',
         '  $nodeSrc = (Get-Command node -ErrorAction SilentlyContinue).Source;',
         "  if ($nodeSrc) { $cands += (Join-Path (Split-Path $nodeSrc) 'pnpm.cmd') };",
         '  $found = $cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;',
@@ -3507,15 +3511,17 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async pnpmAvailable(): Promise<boolean> {
     try { await this.subprocess.resolveExecutable('pnpm'); return true } catch { /* not on PATH */ }
     try { await this.subprocess.resolveExecutable('corepack'); return true } catch { /* no corepack */ }
-    // ZAT 启动器自举的资源(市场常由启动器注入,直接复用):%TEMP%\zat-tools 与 PNPM_MJS。
-    const cands = [
+    // 与 ZAT 启动器的对接约定:PNPM_MJS 与 %TEMP%\zat-tools 的 pnpm 优先
+    // (启动器保证幂等补齐,已知良好),系统 pnpm 兜底。市场不自己装 pnpm。
+    const cands: string[] = []
+    if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
+    cands.push(
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
       join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'),
       join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'),
       join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd'),
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
-    ]
-    if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
+    )
     for (const cand of cands) {
       if (cand && existsSync(cand)) return true
     }
