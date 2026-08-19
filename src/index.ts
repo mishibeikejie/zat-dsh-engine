@@ -108,17 +108,24 @@ function hasBuildScript(scripts?: Record<string, string>): boolean {
   return ['prepare', 'preinstall', 'install', 'postinstall'].some((k) => Boolean(scripts[k]))
 }
 
-/** 从 pnpm 的 PREPARE_NOT_ALLOWED 报错里抠出被拦的包名。 */
+/** 从 pnpm 的 PREPARE_NOT_ALLOWED 报错里抠出要放行的包名(或 pnpm 11 的 包名@spec 完整键)。 */
 function extractBuildName(errText: string): string | null {
-  // "The prepare script of dependency "theme-x" was not run…"
+  // pnpm 11 的 git 托管依赖:报错末尾会给出可直接写进 allowBuilds 的完整键
+  //   allowBuilds:
+  //     dsh-better-sidebar@https://codeload.github.com/.../tar.gz/<commit>: true
+  const m3 = /\n\s{2}([^\n]+?):\s*true\s*\n/.exec(errText)
+  if (m3?.[1] && m3[1].includes('@')) return m3[1].trim()
   const m1 = /prepare\s+script of\s+(?:dependency\s+)?["']?([^"'\s,]+)/i.exec(errText)
   if (m1?.[1]) return m1[1].trim()
-  // "Ignored build scripts: theme-x, other-pkg."
-  const m2 = /Ignored build scripts:\s*([^\n.]+)/i.exec(errText)
+  // "Ignored build scripts: theme-x, other-pkg."(版本号含点,不能按点截断)
+  const m2 = /Ignored build scripts:\s*([^,\r\n]+)/i.exec(errText)
   if (m2?.[1]) {
     const first = m2[1].split(',')[0]!.trim()
     if (first) return first
   }
+  // 退路:从 The git-hosted package "name@0.13.1" 里取裸包名(pnpm 11 裸名可能不生效,但聊胜于无)。
+  const m4 = /The git-hosted package "([^"@]+)@[^"]*"/i.exec(errText)
+  if (m4?.[1]) return m4[1].trim()
   return null
 }
 
@@ -230,7 +237,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.6.3'
+const SELF_VERSION = '0.6.4'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -746,7 +753,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (IS_WIN) {
       let exe = 'powershell.exe'
       try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
-      argv = [exe, '-NoProfile', '-NonInteractive', '-Command', command]
+      argv = [exe, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command]
     } else {
       let sh = '/bin/sh'
       try { sh = await this.subprocess.resolveExecutable('sh') } catch { /* keep fallback */ }
@@ -908,7 +915,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     return false
   }
 
-  /** 把包名加进 pnpm-workspace.yaml 的 allowBuilds,让它的构建脚本能跑。幂等。 */
+  /** 把包名(或 pnpm 11 的 包名@spec 完整键)加进 pnpm-workspace.yaml 的 allowBuilds,让它的构建脚本能跑。幂等。 */
   private async ensureAllowBuilds(name: string): Promise<void> {
     try {
       const dir = await this.getProfileDir()
@@ -918,9 +925,20 @@ export class ZatMarketGateway extends TypertRemoteService {
         const parsed = yaml.load(readFileSync(wsPath, 'utf8'), { schema: PATCH_SCHEMA })
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ws = parsed as Record<string, unknown>
       } catch { /* missing/unparsable → start fresh */ }
-      const allow = Array.isArray(ws.allowBuilds) ? (ws.allowBuilds as unknown[]) : []
-      if (allow.includes(name)) return
-      ws.allowBuilds = [...allow, name]
+      // pnpm 10+ 的 allowBuilds 必须是「键 → true」映射,数组写法会被 pnpm 忽略
+      // (pnpm 11 对 git 托管依赖还要求完整键 包名@fetch地址)。旧版残留的数组
+      // 写法顺手迁移成映射,避免用户之前被写过数组时永远放行失败。
+      let allow: Record<string, boolean> = {}
+      if (ws.allowBuilds && typeof ws.allowBuilds === 'object' && !Array.isArray(ws.allowBuilds)) {
+        allow = ws.allowBuilds as Record<string, boolean>
+      } else if (Array.isArray(ws.allowBuilds)) {
+        for (const item of ws.allowBuilds as unknown[]) {
+          if (typeof item === 'string' && item.trim()) allow[item.trim()] = true
+        }
+      }
+      if (allow[name]) return
+      allow[name] = true
+      ws.allowBuilds = allow
       await this.writeFileText(wsPath, yaml.dump(ws, { schema: PATCH_SCHEMA, noRefs: true }))
     } catch { /* best effort — 装不上时安装流程会报真正的错 */ }
   }
@@ -1599,6 +1617,9 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async pnpmShell(command: string, dir: string, onProgress?: (accumulatedStdout: string) => void): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
     const mirrorWin = "$env:GIT_CONFIG_COUNT=1; $env:GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; $env:GIT_CONFIG_VALUE_0='https://github.com/';"
     const clearWin = 'Remove-Item Env:GIT_CONFIG_COUNT,Env:GIT_CONFIG_KEY_0,Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue;'
+    // 清掉代理环境变量:系统代理开着但 VPN 已关(代理端口已死)时,带代理的所有
+    // 尝试都会失败。清掉后重跑,让"无 VPN → gh-proxy 镜像直连"这条路能走通。
+    const clearProxyWin = 'Remove-Item Env:HTTPS_PROXY,Env:HTTP_PROXY,Env:ALL_PROXY,Env:https_proxy,Env:http_proxy,Env:all_proxy,Env:NO_PROXY,Env:no_proxy -ErrorAction SilentlyContinue;'
     const mirrorLin = "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0='url.https://gh-proxy.com/https://github.com/.insteadOf'; export GIT_CONFIG_VALUE_0='https://github.com/';"
     const clearLin = 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 2>/dev/null;'
     // npm 官方源在国内下载慢(几十 KB/s),走 npmmirror 镜像加速依赖下载。
@@ -1620,21 +1641,40 @@ export class ZatMarketGateway extends TypertRemoteService {
         '};',
       ].join(' ')
       const pnpmSetup = [
+        // dsh 自己就跑在 node 上:把宿主 node 目录加进 PATH,让插件构建脚本
+        // (node-pty 等)在没有系统 node 的机器上也能找到 node。
+        '$nodeDir = \'' + dirname(process.execPath) + '\';',
+        'if (Test-Path $nodeDir) { $env:PATH = $nodeDir + \';\' + $env:PATH };',
+        // ZAT 启动器自举的资源(市场常由启动器注入,直接复用他的,不重复造):
+        // %TEMP%\zat-tools 下的 node.exe / pnpm.cjs / pnpm.exe,以及 PNPM_MJS。
+        '$zatTools = Join-Path $env:TEMP \'zat-tools\';',
+        'if (Test-Path $zatTools) {',
+        '  $ztNode = Get-ChildItem $zatTools -Filter node.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;',
+        '  if ($ztNode) { $env:PATH = (Split-Path $ztNode) + \';\' + $env:PATH };',
+        '};',
         '$pnpm = Get-Command pnpm -ErrorAction SilentlyContinue;',
         'if (-not $pnpm) {',
-        "  $cands = @((Join-Path $env:APPDATA 'npm\\pnpm.cmd'), (Join-Path $env:LOCALAPPDATA 'pnpm\\pnpm.cmd'), (Join-Path $env:ProgramFiles 'nodejs\\pnpm.cmd'));",
+        "  $cands = @((Join-Path $env:APPDATA 'npm\\pnpm.cmd'), (Join-Path $env:LOCALAPPDATA 'pnpm\\pnpm.cmd'), (Join-Path $env:ProgramFiles 'nodejs\\pnpm.cmd'), (Join-Path $env:TEMP 'zat-tools\\pnpm.cjs'), (Join-Path $env:TEMP 'zat-tools\\pnpm.exe'));",
+        '  if ($env:PNPM_MJS) { $cands += $env:PNPM_MJS };',
         '  $nodeSrc = (Get-Command node -ErrorAction SilentlyContinue).Source;',
         "  if ($nodeSrc) { $cands += (Join-Path (Split-Path $nodeSrc) 'pnpm.cmd') };",
         '  $found = $cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;',
-        '  if ($found) { $env:PATH = (Split-Path $found) + \';\' + $env:PATH; $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue };',
+        '  if ($found) {',
+        "    if ($found -like '*.cjs' -or $found -like '*.mjs') { $pnpm = 'node'; $pnpmArgs = $found }",
+        '    else { $env:PATH = (Split-Path $found) + \';\' + $env:PATH; $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue };',
+        '  };',
         '};',
-        'if (-not $pnpm) { $pnpm = \'corepack\'; $pnpmArgs = \'pnpm\' } else { $pnpmArgs = \'\' };',
+        'if (-not $pnpm) { $pnpm = \'corepack\'; $pnpmArgs = \'pnpm\' } else { if (-not $pnpmArgs) { $pnpmArgs = \'\' } };',
       ].join(' ')
       const run = '& $pnpm $pnpmArgs ' + body
-      // 镜像优先:git clone github.com 被墙时走 gh-proxy(2 秒),npm 依赖走 npmmirror 加速,直连兜底。
-      full = proxySetup + registryWin + pnpmSetup + mirrorWin + run + '; if ($LASTEXITCODE -ne 0) { ' + clearWin + run + ' }'
+      // 三段式兜底,每段换一条路:① 系统代理+gh-proxy 镜像 → ② 清代理+镜像
+      // (VPN 已关/代理端口已死时,gh-proxy 国内直连,这就是"没 VPN 也能装"的路径)
+      // → ③ 清代理+清镜像,直连 github。任一成功即停。
+      full = proxySetup + registryWin + pnpmSetup + mirrorWin + run
+        + '; if ($LASTEXITCODE -ne 0) { ' + clearProxyWin + run
+        + '; if ($LASTEXITCODE -ne 0) { ' + clearWin + run + ' } }'
     } else {
-      full = registryLin + mirrorLin + command + ' || { ' + clearLin + command + ' }'
+      full = 'export PATH="' + dirname(process.execPath) + ':$PATH"; ' + registryLin + mirrorLin + command + ' || { ' + clearLin + command + ' }'
     }
     if (!onProgress) return this.runShell(full, dir)
     // Streaming variant: poll collected stdout while the command runs.
@@ -2212,20 +2252,21 @@ export class ZatMarketGateway extends TypertRemoteService {
       const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
       if (alt.outcome.exitCode === 0) pnpmResult = alt
     }
-    // 构建脚本被拦(PREPARE_NOT_ALLOWED):自动把包名写进 allowBuilds 再重试一次。
-    // git 托管的插件普遍要跑 prepare 构建,不该让用户手动改配置文件。
+    // 构建脚本被拦(PREPARE_NOT_ALLOWED):自动把包名/完整键写进 allowBuilds 再重试。
+    // pnpm 11 对 git 依赖每次解析可能换路由(codeload tarball / git+clone),报错里
+    // 的 allowBuilds 键会跟着变,所以循环处理:每轮从最新报错提取键并累计写入,最多 3 轮。
     if (pnpmResult.outcome.exitCode !== 0) {
-      const firstErr = String(pnpmResult.stderr || pnpmResult.stdout || '')
-      if (/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) {
+      for (let round = 0; round < 3 && pnpmResult.outcome.exitCode !== 0; round++) {
+        const firstErr = String(pnpmResult.stderr || pnpmResult.stdout || '')
+        if (!/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) break
         const allowedName = extractBuildName(firstErr) || analysis.name || null
-        if (allowedName) {
-          await this.restoreProfile(dir, snap)
-          await this.ensureAllowBuilds(allowedName)
-          pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
-          for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
-            const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
-            if (alt.outcome.exitCode === 0) pnpmResult = alt
-          }
+        if (!allowedName) break
+        await this.restoreProfile(dir, snap)
+        await this.ensureAllowBuilds(allowedName)
+        pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+        for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
+          const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
+          if (alt.outcome.exitCode === 0) pnpmResult = alt
         }
       }
     }
@@ -2241,16 +2282,28 @@ export class ZatMarketGateway extends TypertRemoteService {
         return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本,已自动放行仍被拦(已还原)。可手动在 pnpm-workspace.yaml 的 allowBuilds 里确认该包名后重试。' }
       }
       const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
-      const accessDenied = /UnauthorizedAccess|EACCES|EPERM|access is denied|access denied|拒绝访问|没有权限|权限不够|Permission Denied/i.test(errText)
-      const networkish = /UND_ERR|ECONN|ETIMEDOUT|Failed to connect|ENOTFOUND|network|fetch/i.test(errText)
-      const reason = accessDenied
-        ? '文件被占用或没有写权限(多半是文件被别的程序锁住、目录只读,或需要管理员权限)'
-        : networkish
-          ? '连不上 GitHub/npm(网络问题)'
-          : (lastLine.slice(0, 120) || '未知原因')
-      const advice = accessDenied
-        ? '解决:关掉占用它的程序(先停 DSH)、确认目录不是只读、必要时用管理员运行,再重试。'
-        : '换个网络或稍后重试。'
+      // 分类顺序是关键:git 拉取失败(镜像改写/认证/仓库不存在)的报错文本常含
+      // "Permission denied"/"access denied"/"UnauthorizedAccess",必须排在
+      // "文件被占用"判定之前——否则网络/认证问题会被误报成文件权限问题,
+      // 把用户误导去"重启 dsh、管理员运行"(多个用户踩过这个坑)。
+      const gitMissing = /spawn git enoent|git is required|(?:^|[;:\s'"])['"]?git(?:\.exe)?[^\r\n]{0,20}?(?:is not recognized|不是内部或外部命令|无法识别)|(?:^|[;:\s])git[^\r\n]{0,12}?not found/i.test(errText)
+      const gitish = /ERR_PNPM_GIT|git (?:ls-remote|clone|fetch)|fatal: (?:could not read username|unable to access|authentication failed|repository .*not found|not a git repository)|permission denied \(publickey\)|terminal prompts disabled|insteadof|requested url returned error/i.test(errText)
+      const networkish = /UND_ERR|ECONN|ETIMEDOUT|ENOTFOUND|failed to connect|could not connect|unable to access|resolve failed|could not resolve|timed out|\bnetwork\b|\bfetch\b|\bproxy\b/i.test(errText)
+      const fileBusy = /EBUSY|EPERM|EACCES|unauthorizedaccess|access is denied|access denied|拒绝访问|没有权限|权限不够|sharing violation|being used by another process/i.test(errText)
+      const reason = gitMissing
+        ? '本机没装 git,而 git 仓库插件必须用它来拉取'
+        : gitish || networkish
+          ? '拉取插件源码/依赖失败(网络、镜像或 git 认证问题,不是文件权限问题)'
+          : fileBusy
+            ? '文件被占用或没有写权限(多半是文件被别的程序锁住、目录只读,或需要管理员权限)'
+            : (lastLine.slice(0, 120) || '未知原因')
+      const advice = gitMissing
+        ? '解决:安装 git(winget install Git.Git 或从 git-scm.com 下载),装完再点安装。'
+        : gitish || networkish
+          ? '解决:开代理/VPN 或稍后重试;市场会自动依次换 gh-proxy/ghfast 镜像重试。'
+          : fileBusy
+            ? '解决:关掉占用它的程序(先停 DSH)、确认目录不是只读、必要时用管理员运行,再重试。'
+            : '换个网络或稍后重试。'
       this.recordIssue('安装/更新失败', reason)
       return { ok: false, packageName: null, message: `安装失败:${reason}。已自动回滚。${advice}` }
     }
@@ -3454,8 +3507,17 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async pnpmAvailable(): Promise<boolean> {
     try { await this.subprocess.resolveExecutable('pnpm'); return true } catch { /* not on PATH */ }
     try { await this.subprocess.resolveExecutable('corepack'); return true } catch { /* no corepack */ }
-    for (const cand of [join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'), join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'), join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd')]) {
-      if (existsSync(cand)) return true
+    // ZAT 启动器自举的资源(市场常由启动器注入,直接复用):%TEMP%\zat-tools 与 PNPM_MJS。
+    const cands = [
+      join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'),
+      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'),
+      join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd'),
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
+      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
+    ]
+    if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
+    for (const cand of cands) {
+      if (cand && existsSync(cand)) return true
     }
     return false
   }

@@ -123,6 +123,13 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.4
+
+- **No more popup windows**: PowerShell windows no longer flash during installs and commands
+- **Works without VPN**: dead system proxies are auto-cleared with a mirror fallback, so installs no longer hang on a stale proxy
+- **Honest error messages**: missing git, network/mirror/git-auth and real file locks are now told apart — no more false "file in use" reports
+- **Build scripts & node handled automatically**: pnpm 11 build gates are auto-allowed, dsh's own node is used when the machine has none, and the ZAT launcher's bootstrapped pnpm/node are reused when present
+
 ### v0.6.3
 
 - **Sessions list shows main conversations only**: subagent sessions are hidden from the active/archived lists
