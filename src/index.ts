@@ -767,6 +767,37 @@ export class ZatMarketGateway extends TypertRemoteService {
     })
   }
 
+  /**
+   * Windows 下把控制台程序(curl/wget/git)包进隐藏窗口的 PowerShell 再 spawn:
+   * DSH 进程没有控制台,直接 spawn curl.exe 这类控制台程序会为每个请求开一个
+   * 全新可见的黑窗(用户反馈"打开市场疯狂弹窗",根因就是这些直连 spawn)。
+   * 包进 -WindowStyle Hidden 的 PowerShell 后,子进程挂到父进程的隐藏控制台上,
+   * 不再弹窗;DSH 的 subprocess 不透传 windowsHide,只能靠这个 argv 方案。
+   * 非 Windows 平台原样透传。
+   */
+  private async winHiddenSpawn(argv: string[], opts: { cwd?: string; graceMs?: number; stdoutMax?: number; stderrMax?: number; stdin?: string } = {}): Promise<SpawnHandle> {
+    const cwd = opts.cwd || this.shellCwd()
+    const stdio = {
+      stdin: opts.stdin !== undefined ? { data: opts.stdin } : ('ignore' as const),
+      stdout: { maxBytes: opts.stdoutMax || 16 * 1024 * 1024 },
+      stderr: { maxBytes: opts.stderrMax || 1024 * 1024 },
+    }
+    if (!IS_WIN) {
+      return this.subprocess.spawn({ argv, cwd, stdio, graceMs: opts.graceMs || 60000 })
+    }
+    let exe = 'powershell.exe'
+    try { exe = await this.subprocess.resolveExecutable('powershell.exe') } catch { /* keep fallback */ }
+    // 必须用调用运算符 `& `:PS 5.1 里语句以引号字符串开头是"表达式上下文",
+    // `'curl' '--version'` 会被当成两个字符串拼一起而解析失败。
+    const quoted = '& ' + argv.map((a) => "'" + String(a).replace(/'/g, "''") + "'").join(' ')
+    return this.subprocess.spawn({
+      argv: [exe, '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', quoted],
+      cwd,
+      stdio,
+      graceMs: opts.graceMs || 60000,
+    })
+  }
+
   /** Run one shell command line on the host platform. */
   private async runShell(command: string, cwd?: string, graceMs?: number): Promise<{ outcome: { exitCode: number }; stdout: string; stderr: string }> {
     const handle = await this.spawnShell(command, cwd, graceMs)
@@ -1925,12 +1956,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     try { curl = await this.subprocess.resolveExecutable('curl') } catch { curl = '' }
     if (!curl) return { status: 0, body: '', error: 'curl not available' }
     const argv = [curl, ...(proxy ? ['--proxy', proxy] : []), '-s', '-L', '--max-time', maxTime, '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.3.1', url]
-    const handle = this.subprocess.spawn({
-      argv,
-      cwd: this.shellCwd(),
-      stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
-      graceMs: 60000,
-    })
+    const handle = await this.winHiddenSpawn(argv, { graceMs: 60000 })
     const outcome = await handle.done
     let stdout = ''
     let stderr = ''
@@ -1951,12 +1977,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     let wget = 'wget'
     try { wget = await this.subprocess.resolveExecutable('wget') } catch { wget = '' }
     if (!wget) return { status: 0, body: '', error: 'wget not available' }
-    const handle = this.subprocess.spawn({
-      argv: [wget, '-q', '-O-', '--server-response', '--timeout=5', '--max-redirect=5', '-U', 'zat-dsh-engine/0.3.1', url],
-      cwd: this.shellCwd(),
-      stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
-      graceMs: 60000,
-    })
+    const handle = await this.winHiddenSpawn([wget, '-q', '-O-', '--server-response', '--timeout=5', '--max-redirect=5', '-U', 'zat-dsh-engine/0.3.1', url], { graceMs: 60000 })
     const outcome = await handle.done
     let stdout = ''
     let stderr = ''
@@ -3901,12 +3922,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     const argv = [curl, ...proxyArgs, '-s', '-L', '--max-time', '5', '-w', '\n%{http_code}', '-H', 'User-Agent: zat-dsh-engine/0.3.1', '-H', 'Accept: application/vnd.github+json', '-X', method]
     if (token) argv.push('-H', `Authorization: Bearer ${token}`)
     argv.push('https://api.github.com' + path)
-    const handle = this.subprocess.spawn({
-      argv,
-      cwd: this.shellCwd(),
-      stdio: { stdin: 'ignore', stdout: { maxBytes: 16 * 1024 * 1024 }, stderr: { maxBytes: 1024 * 1024 } },
-      graceMs: 60000,
-    })
+    const handle = await this.winHiddenSpawn(argv, { graceMs: 60000 })
     const outcome = await handle.done
     let stdout = ''
     let stderr = ''
@@ -3928,13 +3944,11 @@ export class ZatMarketGateway extends TypertRemoteService {
     let git = 'git'
     try { git = await this.subprocess.resolveExecutable('git') } catch { return null }
     try {
-      const handle = this.subprocess.spawn({
-        // credential.interactive=false: 只读已保存的凭据,绝不弹登录窗/浏览器。
-        argv: [git, '-c', 'credential.interactive=false', 'credential', 'fill'],
-        cwd: this.shellCwd(),
-        stdio: { stdin: { data: 'protocol=https\nhost=github.com\n\n' }, stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 16 * 1024 } },
-        graceMs: 30000,
-      })
+      // credential.interactive=false: 只读已保存的凭据,绝不弹登录窗/浏览器。
+      const handle = await this.winHiddenSpawn(
+        [git, '-c', 'credential.interactive=false', 'credential', 'fill'],
+        { stdin: 'protocol=https\nhost=github.com\n\n', stdoutMax: 64 * 1024, stderrMax: 16 * 1024, graceMs: 30000 },
+      )
       const outcome = await handle.done
       if (outcome.exitCode !== 0) return null
       const out = handle.collected?.stdout ? handle.collected.stdout.readFrom(0).text || '' : ''
