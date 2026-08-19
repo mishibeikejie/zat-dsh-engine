@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.6.5
+
+- **Popup windows eliminated for good**: every command (pnpm/git/curl/install/update) on Windows is now spawned directly by node with CREATE_NO_WINDOW — no console window is ever created, zero flashes
+
 ### v0.6.4
 
 - **No more popup windows**: PowerShell windows no longer flash during installs and commands

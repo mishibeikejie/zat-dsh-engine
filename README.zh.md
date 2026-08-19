@@ -125,6 +125,10 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.6.5
+
+- **根治弹窗**:Windows 下所有命令调用(pnpm/git/curl/安装/更新)直接由 node 拉起并加 CREATE_NO_WINDOW,不创建任何控制台窗口,彻底不再闪窗
+
 ### v0.6.4
 
 - **修复安装弹窗**:执行安装/命令时不再弹出 PowerShell 窗口
