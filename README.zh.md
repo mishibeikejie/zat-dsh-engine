@@ -125,6 +125,10 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.7.1
+
+- **更多插件能装了**:GitHub 仓库只放源码、构建产物发布到 npm 的插件(如 dsh-comfyui)之前被「入口文件缺失」拦截;现在会自动识别 npm 上的同源发布并改从 npm 安装
+
 ### v0.7.0
 
 - **修复更新按钮从不出现**:0.6.2 起手写 wire manifest 漏了可选参数 zhLocale,更新检查 RPC 每次都被网关拒绝且客户端静默吞错;现已补上,且 RPC 错误会在界面可见显示

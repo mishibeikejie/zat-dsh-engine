@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.1
+
+- **Install many more plugins**: repos that keep only source on GitHub and publish builds to npm (like dsh-comfyui) were blocked as "entry file missing"; the market now detects the same-source npm release and installs from npm automatically
+
 ### v0.7.0
 
 - **Fix update button never appearing**: the strict wire manifest missed the optional zhLocale parameter since v0.6.2, so every update check RPC was rejected at the gateway and silently swallowed; now declared and RPC errors surface visibly

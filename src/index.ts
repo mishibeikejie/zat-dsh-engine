@@ -238,7 +238,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.7.0'
+const SELF_VERSION = '0.7.1'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -1345,25 +1345,91 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /**
+   * npm 最新版探测(带 30 分钟缓存)。多类判断共用:纯 npm 插件的版本检查、
+   * "GitHub 仓库只是源码、正式发布走 npm"的安装降级。
+   */
+  private npmInfoCache = new Map<string, { version: string; repository?: string; at: number }>()
+  private async npmLatest(name: string): Promise<{ version: string; repository?: string } | null> {
+    const key = name.toLowerCase()
+    const hit = this.npmInfoCache.get(key)
+    if (hit !== undefined && Date.now() - hit.at < 30 * 60 * 1000) return { version: hit.version, repository: hit.repository }
+    let out: { version: string; repository?: string } | null = null
+    try {
+      const esc = name.startsWith('@') ? name.replace('/', '%2F') : name
+      const reg = await this.httpGet(`https://registry.npmjs.org/${esc}`)
+      if (reg.status === 200) {
+        const j = JSON.parse(reg.body) as {
+          'dist-tags'?: { latest?: string }
+          versions?: Record<string, { version?: string; repository?: string | { url?: string } }>
+        }
+        const latest = j['dist-tags']?.latest
+        const v = latest ? j.versions?.[latest] : undefined
+        if (v && typeof v.version === 'string') {
+          const repo = v.repository
+          out = { version: v.version, repository: typeof repo === 'string' ? repo : (repo && typeof repo.url === 'string' ? repo.url : undefined) }
+        }
+      }
+    } catch { out = null }
+    if (out) this.npmInfoCache.set(key, { version: out.version, repository: out.repository, at: Date.now() })
+    return out
+  }
+
+  /** 判断 npm 包的 repository 字段是否指向指定 GitHub 仓库(owner/repo)。 */
+  private repoPointsToGithub(repoField: string | undefined, owner: string, repo: string): boolean {
+    if (!repoField) return false
+    const s = String(repoField).trim().toLowerCase()
+    if (!s) return false
+    const want = `${owner.toLowerCase()}/${repo.toLowerCase()}`
+    // npm shorthand: github:owner/repo (可带 .git)
+    let m = s.match(/^github:([\w.-]+\/[\w.-]+?)(?:\.git)?$/)
+    if (m) return m[1] === want
+    // URL / SCP 形式:…(github.com|git@github.com):owner/repo(.git)
+    m = s.match(/(?:github\.com[/:]|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?(?:[/#?].*)?$/)
+    if (m) return m[1] === want
+    return false
+  }
+
+  /**
+   * 判断一个 GitHub 仓库是否"源码仓库、正式发布走 npm":npm 上存在同名包,
+   * 且其 repository 指向同一个 owner/repo。命中返回包名与最新版本。
+   */
+  private async sameSourceNpm(metaName: string | undefined, owner: string, repo: string): Promise<{ name: string; version: string } | null> {
+    if (!metaName || !/^(@[\w.-]+\/)?[\w.-]+$/.test(metaName)) return null
+    const info = await this.npmLatest(metaName)
+    if (!info || !this.repoPointsToGithub(info.repository, owner, repo)) return null
+    return { name: metaName, version: info.version }
+  }
+
+  /**
    * Pre-install conflict analysis against the candidate repo's manifest and
    * code. Hard problems block the install; soft problems become warnings.
    */
-  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[]; usage: string[]; name?: string; scripts?: Record<string, string> }> {
+  private async analyzeCandidateConflicts(owner: string, repo: string, subdir?: string): Promise<{ block: string[]; warn: string[]; usage: string[]; name?: string; scripts?: Record<string, string>; npmName?: string }> {
     const block: string[] = []
     const warn: string[] = []
     const f = await this.fetchCandidateTexts(owner, repo, subdir)
     if (!f) return { block, warn, usage: [] }
     const meta = f.meta
+    let npmName: string | undefined
     // (0) Declared entry files must exist in the repo — a plugin pointing at
     // uncommitted build artifacts (dist not committed) installs but can never
     // load. BUT: a build script (prepare/preinstall/install/postinstall) can
     // generate those files at install time — such plugins are installable
-    // (auto-allowBuilds handles the pnpm block), so only warn.
+    // (auto-allowBuilds handles the pnpm block), so only warn. AND: many dsh
+    // plugins keep only source on GitHub and publish builds to npm (prepack
+    // runs at publish time) — when npm has a same-source package, install
+    // from npm instead of blocking.
     if (f.missingEntries.length > 0) {
       if (hasBuildScript(meta.scripts)) {
         warn.push(`入口文件缺失(${f.missingEntries.join('、')}),但声明了构建脚本会在安装时现场生成 — 会自动放行构建脚本,装完重启生效`)
       } else {
-        block.push(`入口文件缺失:${f.missingEntries.join('、')} — 构建产物没提交到仓库,装了也加载不起来`)
+        const same = await this.sameSourceNpm(meta.name, owner, repo)
+        if (same) {
+          npmName = same.name
+          warn.push(`GitHub 仓库只是源码(入口 ${f.missingEntries.join('、')} 未提交),npm 已有同源发布 ${same.name}@${same.version} — 将自动改用 npm 官方源安装,效果等同官方 dsh plugin add ${same.name}`)
+        } else {
+          block.push(`入口文件缺失:${f.missingEntries.join('、')} — 构建产物没提交到仓库,装了也加载不起来`)
+        }
       }
     }
     // (1) Host-core official packages must be peers, never direct deps — a
@@ -1433,7 +1499,7 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const sec of scanSecurity(f.clientText, '界面代码')) {
       warn.push(`安全提示:${sec.title}`)
     }
-    return { block, warn, usage: describeUsage(f.hostText, f.clientText), name: meta.name, scripts: meta.scripts }
+    return { block, warn, usage: describeUsage(f.hostText, f.clientText), name: meta.name, scripts: meta.scripts, npmName }
   }
 
   // ── find_plugin 装前体检 ────────────────────────────────────────────────
@@ -1557,7 +1623,14 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (hasBuildScript(meta.scripts)) {
           checks.push({ level: 'warn', title: `入口文件缺失:${missingEntries.join('、')}(有构建脚本会现场生成)`, detail: '构建产物没提交到 git,但声明了 prepare/preinstall 等构建脚本,安装时会自动放行构建并生成;若构建失败再重试即可。' })
         } else {
-          checks.push({ level: 'error', title: `入口文件缺失:${missingEntries.join('、')}`, detail: 'package.json 声明的入口在仓库里不存在——最常见的原因是构建产物(dist)没有提交到 git。装完 dsh 加载就会报错,插件等于用不了。' })
+          // GitHub 仓库只放源码、正式发布走 npm 的插件很常见:仓库里没有构建
+          // 产物不代表不能用——npm 上有同源发布时,商店会自动改用 npm 源安装。
+          const same = await this.sameSourceNpm(meta.name, owner, repo)
+          if (same) {
+            checks.push({ level: 'warn', title: `GitHub 仓库只是源码(入口 ${missingEntries.join('、')} 未提交),npm 已有同源发布 ${same.name}@${same.version}`, detail: `正式发布在 npm:点「安装」会自动从 npm 官方源安装 ${same.name},效果等同官方 dsh plugin add ${same.name},装完即可加载。` })
+          } else {
+            checks.push({ level: 'error', title: `入口文件缺失:${missingEntries.join('、')}`, detail: 'package.json 声明的入口在仓库里不存在,且 npm 上也没有同源发布——最常见的原因是构建产物(dist)没有提交到 git。装完 dsh 加载就会报错,插件等于用不了。' })
+          }
         }
       }
       if (patchMissing) {
@@ -2305,12 +2378,11 @@ export class ZatMarketGateway extends TypertRemoteService {
     while (this.recentIssues.length > 30) this.recentIssues.shift()
   }
 
-  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[]; name?: string; scripts?: Record<string, string> }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string; installedAsDisabled?: boolean; hotReload?: boolean }> {
+  private async addSpec(owner: string, repo: string, subdir?: string, taskId?: string, preAnalysis?: { block: string[]; warn: string[]; name?: string; scripts?: Record<string, string>; npmName?: string }): Promise<{ ok: boolean; packageName: string | null; message?: string; warning?: string; installedAsDisabled?: boolean; hotReload?: boolean }> {
     const o = safeSegment(owner)
     const repoName = safeSegment(repo)
     const s = subdir === undefined ? undefined : safeSubdir(subdir)
     if (!o || !repoName || s === null) return { ok: false, packageName: null, message: 'invalid repository name or subdirectory' }
-    const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
     const dir = await this.getProfileDir()
     const gate = await this.checkMarketConflict(o, repoName)
     if (gate) return { ok: false, packageName: null, message: gate }
@@ -2318,6 +2390,9 @@ export class ZatMarketGateway extends TypertRemoteService {
     if (analysis.block.length > 0) {
       return { ok: false, packageName: null, message: `安装已拦截:${analysis.block.join(';')}。确要强制安装请用官方命令。` }
     }
+    // GitHub 仓库只是源码、npm 有同源发布:改用 npm 官方源安装(效果等同
+    // 官方 dsh plugin add <name>),npm 包自带构建产物,装完即可加载。
+    const npmSource = analysis.npmName || null
     const warnings = analysis.warn.length > 0 ? analysis.warn.join('; ') : undefined
     this.invalidateListCache()
     const snap = await this.snapshotProfile(dir)
@@ -2326,8 +2401,8 @@ export class ZatMarketGateway extends TypertRemoteService {
       await this.ensureAllowBuilds(analysis.name)
     }
     if (taskId) {
-      this.setTaskStep(taskId, 'download', '正在下载安装包…')
-      this.setTaskProgress(taskId, 12, '正在下载安装包…(已进行 0 秒)')
+      this.setTaskStep(taskId, 'download', npmSource ? `正在从 npm 下载 ${npmSource}…` : '正在下载安装包…')
+      this.setTaskProgress(taskId, 12, npmSource ? `正在从 npm 下载 ${npmSource}…(已进行 0 秒)` : '正在下载安装包…(已进行 0 秒)')
     }
     const startedAt = Date.now()
     const progress = taskId ? (text: string) => {
@@ -2340,70 +2415,95 @@ export class ZatMarketGateway extends TypertRemoteService {
       }
       const secs = Math.floor((Date.now() - startedAt) / 1000)
       const pct = Math.min(82, 12 + secs * 2)
-      this.setTaskProgress(taskId, pct, `正在下载安装包…(已进行 ${secs} 秒)${counts ? ' · ' + counts : ''}`)
+      this.setTaskProgress(taskId, pct, `${npmSource ? `正在从 npm 下载 ${npmSource}` : '正在下载安装包'}…(已进行 ${secs} 秒)${counts ? ' · ' + counts : ''}`)
     } : undefined
-    // 默认走官方 GitHub(开 VPN/代理的用户走官方渠道);已知直连不通时优先镜像;
-    // 直连失败再依次尝试两个国内镜像,让没 VPN 的用户也能装。
-    const candidates = this.directDown ? [...this.mirrorSpecs(spec), spec] : [spec, ...this.mirrorSpecs(spec)]
-    let pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
-    for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
-      const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
-      if (alt.outcome.exitCode === 0) pnpmResult = alt
-    }
-    // 构建脚本被拦(PREPARE_NOT_ALLOWED):自动把包名/完整键写进 allowBuilds 再重试。
-    // pnpm 11 对 git 依赖每次解析可能换路由(codeload tarball / git+clone),报错里
-    // 的 allowBuilds 键会跟着变,所以循环处理:每轮从最新报错提取键并累计写入,最多 3 轮。
-    if (pnpmResult.outcome.exitCode !== 0) {
-      for (let round = 0; round < 3 && pnpmResult.outcome.exitCode !== 0; round++) {
-        const firstErr = String(pnpmResult.stderr || pnpmResult.stdout || '')
-        if (!/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) break
-        const allowedName = extractBuildName(firstErr) || analysis.name || null
-        if (!allowedName) break
-        await this.restoreProfile(dir, snap)
-        await this.ensureAllowBuilds(allowedName)
-        pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
-        for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
-          const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
-          if (alt.outcome.exitCode === 0) pnpmResult = alt
+    if (npmSource) {
+      // npm 源不需要 github 镜像链:一条 pnpm add <name> 直装(npm registry
+      // 走 pnpm 自己的镜像配置,不用改环境)。registry 包带构建脚本时同样
+      // 会被 pnpm 的 allowBuilds 拦,失败就提取键重试(最多 3 轮)。
+      let npmResult = await this.pnpmShell('pnpm add ' + npmSource, dir, progress)
+      if (npmResult.outcome.exitCode !== 0) {
+        for (let round = 0; round < 3 && npmResult.outcome.exitCode !== 0; round++) {
+          const firstErr = String(npmResult.stderr || npmResult.stdout || '')
+          if (!/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) break
+          const allowedName = extractBuildName(firstErr) || npmSource || null
+          if (!allowedName) break
+          await this.restoreProfile(dir, snap)
+          await this.ensureAllowBuilds(allowedName)
+          npmResult = await this.pnpmShell('pnpm add ' + npmSource, dir, progress)
         }
       }
-    }
-    if (pnpmResult.outcome.exitCode !== 0) {
-      await this.restoreProfile(dir, snap)
-      const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
-      if (/pnpm[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)|corepack[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(errText)) {
-        this.recordIssue('没装 pnpm', '装/更新插件都靠它。解决:终端跑 corepack enable(或 npm i -g pnpm)。')
-        return { ok: false, packageName: null, message: '没装 pnpm。先跑一条: corepack enable(或 npm i -g pnpm),再重试。' }
+      if (npmResult.outcome.exitCode !== 0) {
+        await this.restoreProfile(dir, snap)
+        const errText = String(npmResult.stderr || npmResult.stdout || '')
+        this.recordIssue('npm 安装失败', errText.trim().split(/\r?\n/).filter(Boolean).pop() || errText)
+        return { ok: false, packageName: null, message: `从 npm 安装 ${npmSource} 失败(已还原)。${(errText.trim().split(/\r?\n/).filter(Boolean).pop() || '').slice(-160)}` }
       }
-      if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
-        this.recordIssue('插件要跑构建脚本被拦截', '已自动尝试放行该插件的构建脚本,仍被拦;请手动检查 pnpm-workspace.yaml 的 allowBuilds 是否有该包名。', 'warn')
-        return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本,已自动放行仍被拦(已还原)。可手动在 pnpm-workspace.yaml 的 allowBuilds 里确认该包名后重试。' }
+    } else {
+      // 默认走官方 GitHub(开 VPN/代理的用户走官方渠道);已知直连不通时优先镜像;
+      // 直连失败再依次尝试两个国内镜像,让没 VPN 的用户也能装。
+      const spec = s ? `github:${o}/${repoName}#path:${s}` : 'github:' + o + '/' + repoName
+      const candidates = this.directDown ? [...this.mirrorSpecs(spec), spec] : [spec, ...this.mirrorSpecs(spec)]
+      let pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+      for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
+        const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
+        if (alt.outcome.exitCode === 0) pnpmResult = alt
       }
-      const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
-      // 分类顺序是关键:git 拉取失败(镜像改写/认证/仓库不存在)的报错文本常含
-      // "Permission denied"/"access denied"/"UnauthorizedAccess",必须排在
-      // "文件被占用"判定之前——否则网络/认证问题会被误报成文件权限问题,
-      // 把用户误导去"重启 dsh、管理员运行"(多个用户踩过这个坑)。
-      const gitMissing = /spawn git enoent|git is required|(?:^|[;:\s'"])['"]?git(?:\.exe)?[^\r\n]{0,20}?(?:is not recognized|不是内部或外部命令|无法识别)|(?:^|[;:\s])git[^\r\n]{0,12}?not found/i.test(errText)
-      const gitish = /ERR_PNPM_GIT|git (?:ls-remote|clone|fetch)|fatal: (?:could not read username|unable to access|authentication failed|repository .*not found|not a git repository)|permission denied \(publickey\)|terminal prompts disabled|insteadof|requested url returned error/i.test(errText)
-      const networkish = /UND_ERR|ECONN|ETIMEDOUT|ENOTFOUND|failed to connect|could not connect|unable to access|resolve failed|could not resolve|timed out|\bnetwork\b|\bfetch\b|\bproxy\b/i.test(errText)
-      const fileBusy = /EBUSY|EPERM|EACCES|unauthorizedaccess|access is denied|access denied|拒绝访问|没有权限|权限不够|sharing violation|being used by another process/i.test(errText)
-      const reason = gitMissing
-        ? '本机没装 git,而 git 仓库插件必须用它来拉取'
-        : gitish || networkish
-          ? '拉取插件源码/依赖失败(网络、镜像或 git 认证问题,不是文件权限问题)'
-          : fileBusy
-            ? '文件被占用或没有写权限(多半是文件被别的程序锁住、目录只读,或需要管理员权限)'
-            : (lastLine.slice(0, 120) || '未知原因')
-      const advice = gitMissing
-        ? '解决:安装 git(winget install Git.Git 或从 git-scm.com 下载),装完再点安装。'
-        : gitish || networkish
-          ? '解决:开代理/VPN 或稍后重试;市场会自动依次换 gh-proxy/ghfast 镜像重试。'
-          : fileBusy
-            ? '解决:关掉占用它的程序(先停 DSH)、确认目录不是只读、必要时用管理员运行,再重试。'
-            : '换个网络或稍后重试。'
-      this.recordIssue('安装/更新失败', reason)
-      return { ok: false, packageName: null, message: `安装失败:${reason}。已自动回滚。${advice}` }
+      // 构建脚本被拦(PREPARE_NOT_ALLOWED):自动把包名/完整键写进 allowBuilds 再重试。
+      // pnpm 11 对 git 依赖每次解析可能换路由(codeload tarball / git+clone),报错里
+      // 的 allowBuilds 键会跟着变,所以循环处理:每轮从最新报错提取键并累计写入,最多 3 轮。
+      if (pnpmResult.outcome.exitCode !== 0) {
+        for (let round = 0; round < 3 && pnpmResult.outcome.exitCode !== 0; round++) {
+          const firstErr = String(pnpmResult.stderr || pnpmResult.stdout || '')
+          if (!/PREPARE_NOT_ALLOWED|allowBuilds|build script/i.test(firstErr)) break
+          const allowedName = extractBuildName(firstErr) || analysis.name || null
+          if (!allowedName) break
+          await this.restoreProfile(dir, snap)
+          await this.ensureAllowBuilds(allowedName)
+          pnpmResult = await this.pnpmShell('pnpm add ' + candidates[0]!, dir, progress)
+          for (let i = 1; i < candidates.length && pnpmResult.outcome.exitCode !== 0; i++) {
+            const alt = await this.pnpmShell('pnpm add ' + candidates[i]!, dir, progress)
+            if (alt.outcome.exitCode === 0) pnpmResult = alt
+          }
+        }
+      }
+      if (pnpmResult.outcome.exitCode !== 0) {
+        await this.restoreProfile(dir, snap)
+        const errText = String(pnpmResult.stderr || pnpmResult.stdout || '')
+        if (/pnpm[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)|corepack[^\n]*(?:不是内部或外部命令|无法识别|command not found|is not recognized)/i.test(errText)) {
+          this.recordIssue('没装 pnpm', '装/更新插件都靠它。解决:终端跑 corepack enable(或 npm i -g pnpm)。')
+          return { ok: false, packageName: null, message: '没装 pnpm。先跑一条: corepack enable(或 npm i -g pnpm),再重试。' }
+        }
+        if (errText.includes('PREPARE_NOT_ALLOWED') || errText.includes('allowBuilds') || errText.includes('build script')) {
+          this.recordIssue('插件要跑构建脚本被拦截', '已自动尝试放行该插件的构建脚本,仍被拦;请手动检查 pnpm-workspace.yaml 的 allowBuilds 是否有该包名。', 'warn')
+          return { ok: false, packageName: null, message: '安装失败:插件要跑构建脚本,已自动放行仍被拦(已还原)。可手动在 pnpm-workspace.yaml 的 allowBuilds 里确认该包名后重试。' }
+        }
+        const lastLine = errText.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+        // 分类顺序是关键:git 拉取失败(镜像改写/认证/仓库不存在)的报错文本常含
+        // "Permission denied"/"access denied"/"UnauthorizedAccess",必须排在
+        // "文件被占用"判定之前——否则网络/认证问题会被误报成文件权限问题,
+        // 把用户误导去"重启 dsh、管理员运行"(多个用户踩过这个坑)。
+        const gitMissing = /spawn git enoent|git is required|(?:^|[;:\s'"])['"]?git(?:\.exe)?[^\r\n]{0,20}?(?:is not recognized|不是内部或外部命令|无法识别)|(?:^|[;:\s])git[^\r\n]{0,12}?not found/i.test(errText)
+        const gitish = /ERR_PNPM_GIT|git (?:ls-remote|clone|fetch)|fatal: (?:could not read username|unable to access|authentication failed|repository .*not found|not a git repository)|permission denied \(publickey\)|terminal prompts disabled|insteadof|requested url returned error/i.test(errText)
+        const networkish = /UND_ERR|ECONN|ETIMEDOUT|ENOTFOUND|failed to connect|could not connect|unable to access|resolve failed|could not resolve|timed out|\bnetwork\b|\bfetch\b|\bproxy\b/i.test(errText)
+        const fileBusy = /EBUSY|EPERM|EACCES|unauthorizedaccess|access is denied|access denied|拒绝访问|没有权限|权限不够|sharing violation|being used by another process/i.test(errText)
+        const reason = gitMissing
+          ? '本机没装 git,而 git 仓库插件必须用它来拉取'
+          : gitish || networkish
+            ? '拉取插件源码/依赖失败(网络、镜像或 git 认证问题,不是文件权限问题)'
+            : fileBusy
+              ? '文件被占用或没有写权限(多半是文件被别的程序锁住、目录只读,或需要管理员权限)'
+              : (lastLine.slice(0, 120) || '未知原因')
+        const advice = gitMissing
+          ? '解决:安装 git(winget install Git.Git 或从 git-scm.com 下载),装完再点安装。'
+          : gitish || networkish
+            ? '解决:开代理/VPN 或稍后重试;市场会自动依次换 gh-proxy/ghfast 镜像重试。'
+            : fileBusy
+              ? '解决:关掉占用它的程序(先停 DSH)、确认目录不是只读、必要时用管理员运行,再重试。'
+              : '换个网络或稍后重试。'
+        this.recordIssue('安装/更新失败', reason)
+        return { ok: false, packageName: null, message: `安装失败:${reason}。已自动回滚。${advice}` }
+      }
     }
     if (taskId) {
       this.setTaskStep(taskId, 'verify', '下载完成,正在校验并写入启用名单…')
@@ -2422,7 +2522,12 @@ export class ZatMarketGateway extends TypertRemoteService {
     for (const name of deps) {
       if (bundles.includes(name)) continue
       const specVal = String(((after.dependencies || {}) as Record<string, string>)[name] || '')
-      if (!specVal.toLowerCase().includes(o.toLowerCase() + '/' + repoName.toLowerCase())) continue
+      if (npmSource) {
+        // npm 源安装:依赖表里出现的就是裸包名(版本号 spec),按包名匹配。
+        if (name.toLowerCase() !== npmSource.toLowerCase()) continue
+      } else if (!specVal.toLowerCase().includes(o.toLowerCase() + '/' + repoName.toLowerCase())) {
+        continue
+      }
       matched = true
       matchedName = name
       try {
@@ -3054,10 +3159,13 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
         this.setTaskStep(id, 'download', '正在下载安装包…(网络慢时可能较久,请稍候)')
         const res = await this.addSpec(o, r, s || undefined, id, analysis)
+        const installedLabel = analysis.npmName
+          ? `npm 包 ${analysis.npmName}(github:${o}/${r} 的官方发布)`
+          : `github:${o}/${r}${s ? `#path:${s}` : ''}`
         return res.ok
           ? { ok: true, packageName: res.packageName, message: res.hotReload
             ? `已安装(主题/界面插件)— 刷新页面即可生效。${res.warning ? '。风险提示:' + res.warning : ''}`
-            : `已安装 github:${o}/${r}${s ? `#path:${s}` : ''} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
+            : `已安装 ${installedLabel} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, packageName: res.packageName, installedAsDisabled: res.installedAsDisabled === true, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
@@ -3086,9 +3194,14 @@ export class ZatMarketGateway extends TypertRemoteService {
         }
         this.setTaskStep(id, 'download', '正在下载新版本…(网络慢时可能较久,请稍候)')
         const res = await this.addSpec(o, r, s || undefined, id, analysis)
-        const version = await this.remoteVersion(o, r, s || undefined)
+        const version = analysis.npmName
+          ? (await this.npmLatest(analysis.npmName))?.version || null
+          : await this.remoteVersion(o, r, s || undefined)
+        const updatedLabel = analysis.npmName
+          ? `npm 包 ${analysis.npmName}(github:${o}/${r} 的官方发布)`
+          : `github:${o}/${r}${s ? `#path:${s}` : ''}`
         return res.ok
-          ? { ok: true, version, message: `已更新 github:${o}/${r}${s ? `#path:${s}` : ''} 到 v${version || '?'} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
+          ? { ok: true, version, message: `已更新 ${updatedLabel} 到 v${version || '?'} — 重启 dsh 后生效。${analysis.usage[0] || ''}${res.warning ? '。风险提示:' + res.warning : ''}` }
           : { ok: false, packageName: res.packageName, installedAsDisabled: res.installedAsDisabled === true, message: res.message }
       }, { owner: o, repo: r })
       return { ok: true, taskId }
