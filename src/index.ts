@@ -251,7 +251,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.7.2'
+const SELF_VERSION = '0.7.3'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3572,6 +3572,10 @@ export class ZatMarketGateway extends TypertRemoteService {
           const bare = rec.name.replace(/^@[\w.-]+\//, '')
           if (seen.has('npm:' + bare.toLowerCase())) continue
           seen.add('npm:' + bare.toLowerCase())
+          // dsh 自己装进 profile 的运行时核心(如 @deepseek-ai/dsh-base、
+          // @deepseek-ai/dsh-web-app)不是用户装的插件——“已安装”里不能出现,
+          // 否则用户会以为那是可管理的东西。直接跳过,连"系统组件"都别显示。
+          if (isCoreComponent(rec.name)) continue
           noRepo.push({ name: rec.name, enabled: rec.enabled })
           continue
         }

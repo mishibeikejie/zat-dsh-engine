@@ -1156,12 +1156,6 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
                 : ''}
             </div>
           )}
-          {detail.isHarness && detail.noRepo && (
-            <div className="zat-summary">
-              <span className="zat-zhlabel">{t('系统组件:', 'System component:')}</span>
-              {t('这是 dsh Web GUI 自己的运行时组件(dsh 随 profile 一起装的),不是市场安装的插件,不能卸载或停用——卸了界面就起不来了。', 'This is a dsh Web GUI runtime component shipped with dsh itself, not a market plugin. It cannot be uninstalled or disabled — the UI would break.')}
-            </div>
-          )}
           {detail.kind === 'skill' && !detail.installed && (
             <div className="zat-summary">
               <span className="zat-zhlabel">{t('技能(skill):', 'Skill:')}</span>

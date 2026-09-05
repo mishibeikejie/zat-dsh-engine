@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.3
+
+- **"已安装"只显示用户装的插件**:dsh 自己装进 profile 的运行时核心(`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`)不再出现在已安装列表里——之前被当作普通插件列出,误导用户以为可以卸载/停用它
+
 ### v0.7.2
 
 - **Never uninstall the GUI's own runtime components**: `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app` (dsh installs them into the Web profile itself) were listed as ordinary installed plugins with a working uninstall button — the market now marks them as read-only system components and the host refuses to uninstall/disable them
