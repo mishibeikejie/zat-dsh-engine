@@ -123,6 +123,11 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.2
+
+- **Never uninstall the GUI's own runtime components**: `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app` (dsh installs them into the Web profile itself) were listed as ordinary installed plugins with a working uninstall button — the market now marks them as read-only system components and the host refuses to uninstall/disable them
+- **Keep buttons alive when a job stalls**: a stuck background task kept every action button disabled with no feedback; task polling now times out, releases the buttons and says so
+
 ### v0.7.1
 
 - **Install many more plugins**: repos that keep only source on GitHub and publish builds to npm (like dsh-comfyui) were blocked as "entry file missing"; the market now detects the same-source npm release and installs from npm automatically

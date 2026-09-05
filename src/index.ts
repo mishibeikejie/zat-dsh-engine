@@ -55,6 +55,19 @@ const PATCH_SCHEMA = yaml.JSON_SCHEMA.extend(JS_EXPR_TYPE)
 const HARNESS_REPOS = ['deepseek-ai/deepseek-harness']
 
 /**
+ * Official runtime components dsh itself installs into the Web profile as the
+ * GUI's own skeleton (they sit in `dependencies` AND `bundles`). They must not
+ * be uninstalled/disabled from the market — the Web UI would break. The
+ * market shows them as read-only "system components" instead.
+ */
+const CORE_COMPONENTS = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+
+/** True when a package is one of dsh's own Web-runtime core components. */
+function isCoreComponent(name: string): boolean {
+  return CORE_COMPONENTS.includes(String(name).trim())
+}
+
+/**
  * Marketplace / plugin-manager plugins. Two of these running at once
  * register conflicting pages and services and crash the Web UI — a
  * beginner trap that has already bricked real profiles. The install gate
@@ -238,7 +251,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.7.1'
+const SELF_VERSION = '0.7.2'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3235,6 +3248,10 @@ export class ZatMarketGateway extends TypertRemoteService {
   async uninstall(name: string): Promise<JsonObject> {
     const n = safePackageName(name)
     if (!n) return { ok: false, message: 'invalid package name' }
+    // Official Web-runtime core components are the GUI itself — refuse.
+    if (isCoreComponent(n)) {
+      return { ok: false, message: `${n} 是 dsh Web GUI 的运行时组件,不能卸载(卸了界面就没了)。这是显示为"已安装"的系统组件,不是市场装的插件。` }
+    }
     // The market must not delete itself: even if a client finds a way past the
     // hidden card, the host refuses. Removal stays possible via the official CLI.
     if (n === 'zat-dsh-engine') {
@@ -3596,7 +3613,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           installed: rec.enabled,
           installedName: rec.name,
           installedVersion: version,
-          isHarness: false,
+          isHarness: isCoreComponent(rec.name),
           disabled: !rec.enabled,
           kind: 'plugin',
           noRepo: true,
@@ -3650,6 +3667,9 @@ export class ZatMarketGateway extends TypertRemoteService {
     try {
       const n = safePackageName(name)
       if (!n) return { ok: false, message: 'invalid package name' }
+      if (isCoreComponent(n) && !enabled) {
+        return { ok: false, message: `${n} 是 dsh Web GUI 的运行时组件,不能停用(界面就没了)。` }
+      }
       const dir = await this.getProfileDir()
       this.invalidateListCache()
       const p = await this.readProfile()

@@ -776,9 +776,21 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
   }
 
   /** Poll a background task, rendering its progress until it finishes. */
+  /** 后台任务轮询上限(ms):超过就放弃轮询并释放按钮状态。 */
+  const POLL_TIMEOUT_MS = 300_000
+
   function pollTask(taskId: string, onDone: (result: MarketJson) => void): void {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    // 任务卡死保护:后台任务挂住时停止轮询并释放按钮,避免面板所有
+    // 操作键被 installing 卡成"点了没反应"。
+    const startedAt = Date.now()
     const tick = (): void => {
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setProgress(null)
+        setInstalling('')
+        setNotice(t('任务似乎卡住了,已停止轮询(后台任务可能仍在执行);可以稍后再试,或重启 dsh 看看。', 'The task seems stuck — polling stopped (the background task may still run). Try again later or restart dsh.'))
+        return
+      }
       void pm.taskStatus(taskId).then((res) => {
         if (!res.ok) {
           setProgress(null)
@@ -1110,7 +1122,7 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
               <span className="zat-osbadge">{t('支持系统:', 'Supported:')} {detail.os.length === 0 ? t('跨平台', 'Cross-platform') : osNames(detail.os)}</span>
             </div>
           )}
-          {detail.noRepo && (
+          {detail.noRepo && !detail.isHarness && (
             <div className="zat-subchoices">
               <div className="zat-subchoices-title">
                 {t('这个插件是 npm/本地直接安装的,没有 GitHub 仓库地址,不支持更新、点星和查看仓库详情;可以在这里卸载或停用。', 'This plugin was installed from npm or locally with no GitHub repo, so update, star and repo detail are unavailable — you can uninstall or disable it here.')}
@@ -1142,6 +1154,12 @@ function MarketPanel({ pm, locale }: MarketPanelProps) {
               {dd && dd.harnessHasUpdate && dd.harnessRemote
                 ? ` ${t('官方已发布新版本 v', 'A newer version v')}${String(dd.harnessRemote)}${t(',请到官方 Release 页面按你的安装方式更新。', ', please update through the official release page using your install method.')}`
                 : ''}
+            </div>
+          )}
+          {detail.isHarness && detail.noRepo && (
+            <div className="zat-summary">
+              <span className="zat-zhlabel">{t('系统组件:', 'System component:')}</span>
+              {t('这是 dsh Web GUI 自己的运行时组件(dsh 随 profile 一起装的),不是市场安装的插件,不能卸载或停用——卸了界面就起不来了。', 'This is a dsh Web GUI runtime component shipped with dsh itself, not a market plugin. It cannot be uninstalled or disabled — the UI would break.')}
             </div>
           )}
           {detail.kind === 'skill' && !detail.installed && (
