@@ -1827,31 +1827,23 @@ export class ZatMarketGateway extends TypertRemoteService {
     return last
   }
 
-  /** 解析 pnpm 调用前缀(不含命令参数)。Windows 优先直连可执行文件,绝不产生控制台窗口。 */
+  /** 解析 pnpm 调用前缀(不含命令参数)。Windows 优先直连可执行文件,绝不产生控制台窗口。
+   * ★ 1.5.3 原则(与 ZAT 启动器对齐):只用自带工具链(%TEMP%\zat-tools 与 PNPM_MJS),
+   *   PATH / LOCALAPPDATA / ProgramFiles 等"系统寻找"全部移除——启动器自己下载的
+   *   pnpm 装哪就是哪,用户装在哪不关我们事;自带没有就明确失败,不悄悄用系统的。 */
   private async resolvePnpmCommand(): Promise<string[] | null> {
-    const pathDirs = (process.env.PATH || '').split(IS_WIN ? ';' : ':')
-    for (const d of pathDirs) {
-      if (!d) continue
-      const exe = join(d, 'pnpm.exe')
-      if (IS_WIN && existsSync(exe)) return [exe]
-      const cmd = join(d, 'pnpm.cmd')
-      if (IS_WIN && existsSync(cmd)) {
-        const via = this.pnpmFromCmdShim(cmd)
-        if (via) return via
-      }
-      const bare = join(d, 'pnpm')
-      if (!IS_WIN && existsSync(bare)) return [bare]
-    }
     const cands: string[] = []
     if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
-    cands.push(
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
-      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.exe'),
-      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'),
-      join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'),
-      join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd'),
-    )
+    // ★ 自带工具链:standalone 优先(直接执行,稳定),pnpm.cjs 次之;绝不找系统位置
+    const zt = join(process.env.TEMP || '', 'zat-tools')
+    try {
+      const verDirs = readdirSync(zt)
+        .filter(n => /^pnpm-\d+\.\d+\.\d+$/.test(n) && existsSync(join(zt, n, 'pnpm.exe')))
+        .sort()
+      for (const n of verDirs) cands.push(join(zt, n, 'pnpm.exe'))
+    } catch { /* 工具目录不可读,忽略 */ }
+    cands.push(join(zt, 'pnpm.exe'), join(zt, 'pnpm.cjs'))
+    // ★ 不再找 LOCALAPPDATA / APPDATA / ProgramFiles 系统位置(用户原则:拒绝系统寻找)
     for (const c of cands) {
       if (!c || !existsSync(c)) continue
       if (c.endsWith('.cjs') || c.endsWith('.mjs')) return [process.execPath, c]
@@ -1860,10 +1852,6 @@ export class ZatMarketGateway extends TypertRemoteService {
         if (via) return via
       }
       return [c]
-    }
-    if (IS_WIN) {
-      const corepack = join(dirname(process.execPath), 'corepack.cmd')
-      if (existsSync(corepack)) return [corepack, 'pnpm']
     }
     return null
   }
@@ -3751,21 +3739,20 @@ export class ZatMarketGateway extends TypertRemoteService {
    * (official deps, duplicate loader ids, multiple markets), soft risks
    * (version majors, missing peers) and informational items.
    */
-  /** pnpm 是否可用(装/更新/修复都靠它)。 */
+  /** pnpm 是否可用(装/更新/修复都靠它)。★ 1.5.3 原则:只用自带工具链(%TEMP%\zat-tools
+   * 与 PNPM_MJS),绝不查系统 PATH / LOCALAPPDATA / ProgramFiles——启动器自己下载的 pnpm
+   * 装哪就是哪,用户装在哪不关我们事。自带没有时如实返回 false(让启动器去补齐)。 */
   private async pnpmAvailable(): Promise<boolean> {
-    try { await this.subprocess.resolveExecutable('pnpm'); return true } catch { /* not on PATH */ }
-    try { await this.subprocess.resolveExecutable('corepack'); return true } catch { /* no corepack */ }
-    // 与 ZAT 启动器的对接约定:PNPM_MJS 与 %TEMP%\zat-tools 的 pnpm 优先
-    // (启动器保证幂等补齐,已知良好),系统 pnpm 兜底。市场不自己装 pnpm。
     const cands: string[] = []
     if (process.env.PNPM_MJS) cands.push(process.env.PNPM_MJS)
-    cands.push(
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.cjs'),
-      join(process.env.TEMP || '', 'zat-tools', 'pnpm.exe'),
-      join(process.env.APPDATA || '', 'npm', 'pnpm.cmd'),
-      join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cmd'),
-      join(process.env.ProgramFiles || '', 'nodejs', 'pnpm.cmd'),
-    )
+    const zt = join(process.env.TEMP || '', 'zat-tools')
+    try {
+      const verDirs = readdirSync(zt)
+        .filter(n => /^pnpm-\d+\.\d+\.\d+$/.test(n) && existsSync(join(zt, n, 'pnpm.exe')))
+        .sort()
+      for (const n of verDirs) cands.push(join(zt, n, 'pnpm.exe'))
+    } catch { /* 工具目录不可读,忽略 */ }
+    cands.push(join(zt, 'pnpm.exe'), join(zt, 'pnpm.cjs'))
     for (const cand of cands) {
       if (cand && existsSync(cand)) return true
     }
