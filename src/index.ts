@@ -67,6 +67,42 @@ function isCoreComponent(name: string): boolean {
   return CORE_COMPONENTS.includes(String(name).trim())
 }
 
+/** 会话头的最小形状:新旧 dsh 都满足(id 必有,其余可能缺)。 */
+interface StoredSessionHeader {
+  id: string
+  createdAt?: number
+  origin?: string
+  parentSession?: string
+  delegationDepth?: number
+}
+
+/**
+ * 兼容两种 `sessionPersistence.list()` 形状:新版返回
+ * `{ header: SessionHeader, revision, ... }` 快照,旧版直接返回 header。
+ * 一律取到真正的 header,否则 id/createdAt/origin 全是 undefined
+ * (标题丢失、时间 1970、子代理会话过滤失效)。
+ */
+function listHeader(raw: unknown): StoredSessionHeader | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const h = (r.header && typeof r.header === 'object' ? r.header : r) as Record<string, unknown>
+  if (typeof h.id !== 'string' || !h.id) return undefined
+  const out: StoredSessionHeader = { id: h.id }
+  if (typeof h.createdAt === 'number') out.createdAt = h.createdAt
+  if (typeof h.origin === 'string') out.origin = h.origin
+  if (typeof h.parentSession === 'string') out.parentSession = h.parentSession
+  if (typeof h.delegationDepth === 'number') out.delegationDepth = h.delegationDepth
+  return out
+}
+
+/** 投影缓存记录 `{ identity, rows }`;兼容带 `{ version, record }` 外壳的原始分片。 */
+function checkpointRecordOf(raw: unknown): { identity?: { createdAt?: unknown }; rows?: Record<string, { val?: unknown }> } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const r = raw as Record<string, unknown>
+  const inner = (r.record && typeof r.record === 'object' ? r.record : r) as Record<string, unknown>
+  return inner as { identity?: { createdAt?: unknown }; rows?: Record<string, { val?: unknown }> }
+}
+
 /**
  * Marketplace / plugin-manager plugins. Two of these running at once
  * register conflicting pages and services and crash the Web UI — a
@@ -251,7 +287,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.7.3'
+const SELF_VERSION = '0.7.4'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3301,8 +3337,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   // ── conversation management (delete sessions) ──────────────────────────
 
   /** Soft faces: the session panel degrades gracefully where services differ. */
-  private get persistenceFace(): { list(): Promise<Array<{ id: string; createdAt: number; origin?: string; parentSession?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined {
-    return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<Array<{ id: string; createdAt: number; origin?: string; parentSession?: string }>>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
+  private get persistenceFace(): { list(): Promise<readonly unknown[]>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined {
+    return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<readonly unknown[]>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
   }
 
   private get workspaceRegistryFace(): { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined {
@@ -3332,7 +3368,8 @@ export class ZatMarketGateway extends TypertRemoteService {
       if (!persistence) return { ok: false, message: '当前环境不支持会话管理' }
       const registry = this.workspaceRegistryFace
       const agents = this.agentsFace
-      const headers = await persistence.list()
+      const headers = (await persistence.list()).map(listHeader)
+        .filter((h): h is StoredSessionHeader => h !== undefined)
       const archived = registry ? registry.archivedSessionIds : []
       const workspaces = registry ? registry.list() : []
       const sessionsRegistry = this.sessionsRegistryFace
@@ -3341,32 +3378,41 @@ export class ZatMarketGateway extends TypertRemoteService {
       const projTable = domain?.table('sessions')
       const sessions: JsonObject[] = []
       for (const h of headers) {
-        const live = Boolean(agents && agents.get(h.id) !== undefined && agents.get(h.id)!.status === 'running')
+        const id = h.id
+        const live = Boolean(agents && agents.get(id) !== undefined && agents.get(id)!.status === 'running')
         // Title: live sessions answer from the title service; cold sessions
         // read the persisted projection-cache row (key 'title').
         let title = ''
         if (sessionsRegistry !== undefined && titleService !== undefined) {
-          const liveSession = sessionsRegistry.get(h.id)
+          const liveSession = sessionsRegistry.get(id)
           if (liveSession !== undefined) {
             const snap = titleService.get(liveSession)
             if (snap && snap.title) title = String(snap.title)
           }
         }
-        if (!title && projTable !== undefined) {
+        // 时间兜底:新版 dsh 的 header 里有 createdAt,但投影缓存 record.identity
+        // 也带着同一份创建时间——两处都试,避免出现 1970。
+        let createdAt = typeof h.createdAt === 'number' && h.createdAt > 0 ? h.createdAt : 0
+        if (projTable !== undefined) {
           try {
-            const row = await projTable.get(h.id) as { rows?: Record<string, { val?: unknown }> } | undefined
-            const t = row?.rows?.['title']?.val
-            if (typeof t === 'string' && t.trim()) title = t.trim()
+            const rec = checkpointRecordOf(await projTable.get(id))
+            if (rec !== undefined) {
+              const t = rec.rows?.['title']?.val
+              if (!title && typeof t === 'string' && t.trim()) title = t.trim()
+              const ic = rec.identity?.createdAt
+              if (createdAt === 0 && typeof ic === 'number' && ic > 0) createdAt = ic
+            }
           } catch { /* no cache row — no title yet */ }
         }
         sessions.push({
-          id: h.id,
+          id,
           title,
-          createdAt: h.createdAt || 0,
+          createdAt,
           live,
-          subagent: Boolean(h.origin === 'subagent'),
-          archived: archived.includes(h.id),
-          inWorkspace: workspaces.some((w) => (w.sessionIds as readonly string[]).includes(h.id)),
+          // 子代理会话必须隐藏:origin 是主判据,delegationDepth 兜住只有深度的新会话。
+          subagent: h.origin === 'subagent' || (typeof h.delegationDepth === 'number' && h.delegationDepth > 0),
+          archived: archived.includes(id),
+          inWorkspace: workspaces.some((w) => (w.sessionIds as readonly string[]).includes(id)),
         })
       }
       // 对话管理只显示主对话:子代理会话直接隐藏(它们独立于主对话上下文,
@@ -3401,7 +3447,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           if (agentCtx && typeof agentCtx.dispose === 'function') agentCtx.dispose()
         } catch { /* proceed with the file/accounting delete regardless */ }
       }
-      const header = (await persistence.list()).find((c) => c.id === id)
+      const header = (await persistence.list()).map(listHeader).find((c) => c?.id === id)
       const registry = this.workspaceRegistryFace
       if (header === undefined) {
         const accounted = registry !== undefined && (registry.archivedSessionIds.includes(id)
@@ -3472,7 +3518,8 @@ export class ZatMarketGateway extends TypertRemoteService {
   private async subagentDescendants(rootId: string): Promise<Array<{ id: string; header: { id: string; origin?: string } }>> {
     const persistence = this.persistenceFace
     if (!persistence) return []
-    const headers = await persistence.list()
+    const headers = (await persistence.list()).map(listHeader)
+      .filter((h): h is StoredSessionHeader => h !== undefined)
     const childrenOf = new Map<string, Array<{ id: string; header: { id: string; origin?: string } }>>()
     for (const h of headers) {
       if (h.origin !== 'subagent') continue

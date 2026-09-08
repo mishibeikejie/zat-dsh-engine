@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.4
+
+- **对话管理适配新版 dsh**:`sessionPersistence.list()` 现在返回 `{ header, … }` 快照(投影缓存升到 v7),旧代码把快照当 header 读——标题全空、时间全 1970、子代理会话没被过滤(于是冒出一堆陌生对话)。现在两种形状都兼容:标题/时间从 `header` 或投影缓存 `record.identity` 取,子代理会话按 `origin`/`delegationDepth` 隐藏,删除与级联删除同样修正
+
 ### v0.7.3
 
 - **"已安装"只显示用户装的插件**:dsh 自己装进 profile 的运行时核心(`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`)不再出现在已安装列表里——之前被当作普通插件列出,误导用户以为可以卸载/停用它
