@@ -71,6 +71,8 @@ function isCoreComponent(name: string): boolean {
 interface StoredSessionHeader {
   id: string
   createdAt?: number
+  /** 创建会话时的工作目录——persistence.locate() 靠它算会话目录,不能丢。 */
+  cwd?: string
   origin?: string
   parentSession?: string
   delegationDepth?: number
@@ -79,20 +81,16 @@ interface StoredSessionHeader {
 /**
  * 兼容两种 `sessionPersistence.list()` 形状:新版返回
  * `{ header: SessionHeader, revision, ... }` 快照,旧版直接返回 header。
- * 一律取到真正的 header,否则 id/createdAt/origin 全是 undefined
- * (标题丢失、时间 1970、子代理会话过滤失效)。
+ * 一律取到真正的 header 对象本身(保留 cwd 等全部字段,locate 要用),
+ * 否则 id/createdAt/origin 全是 undefined(标题丢失、时间 1970、
+ * 子代理会话过滤失效),cwd 丢失还会让删除算错路径。
  */
 function listHeader(raw: unknown): StoredSessionHeader | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const r = raw as Record<string, unknown>
   const h = (r.header && typeof r.header === 'object' ? r.header : r) as Record<string, unknown>
   if (typeof h.id !== 'string' || !h.id) return undefined
-  const out: StoredSessionHeader = { id: h.id }
-  if (typeof h.createdAt === 'number') out.createdAt = h.createdAt
-  if (typeof h.origin === 'string') out.origin = h.origin
-  if (typeof h.parentSession === 'string') out.parentSession = h.parentSession
-  if (typeof h.delegationDepth === 'number') out.delegationDepth = h.delegationDepth
-  return out
+  return h as unknown as StoredSessionHeader
 }
 
 /** 投影缓存记录 `{ identity, rows }`;兼容带 `{ version, record }` 外壳的原始分片。 */
@@ -287,7 +285,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.7.4'
+const SELF_VERSION = '0.7.5'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3457,13 +3455,10 @@ export class ZatMarketGateway extends TypertRemoteService {
         return { ok: true, message: `已清理会话 ${id} 的记账记录` }
       }
       if (header.origin === 'subagent') return { ok: false, message: '子代理会话不能直接删除' }
-      const location = persistence.locate(header)
-      if (location === undefined) return { ok: false, message: '这个会话没有可删除的本地文件' }
-      try {
-        rmSync(dirname(location.path), { recursive: true, force: true })
-      } catch (err) {
-        return { ok: false, message: `删除会话文件失败:${(err as { message?: string })?.message || String(err)}` }
-      }
+      // 删文件:locate 用完整 header(cwd 参与路径计算),另加 <DSH_HOME>/sessions
+      // 扫描兜底——只信 locate 会"删掉一个不存在的目录、文件还在、会话复活"。
+      const removeError = await this.removeSessionFiles(persistence, header)
+      if (removeError !== undefined) return { ok: false, message: removeError }
       let warning = ''
       if (registry !== undefined) warning = await this.forgetSessionCompat(registry, id)
       try {
@@ -3498,6 +3493,42 @@ export class ZatMarketGateway extends TypertRemoteService {
     } catch (err) {
       return { ok: false, message: String((err as { message?: string })?.message || err) }
     }
+  }
+
+  /**
+   * 删除会话的磁盘目录。新版 dsh 的 locate 依赖 header.cwd,路径规则也可能随
+   * 版本变化——只信 locate 会出现"删了个不存在的目录、文件还在、会话复活"。
+   * 这里 locate + 扫描 <DSH_HOME>/sessions 兜底,两条路都试。
+   * @param persistence - 会话持久化服务(其 locate 是诊断钩子,可能不存在)。
+   * @param header - 完整的会话 header(必须带 cwd)。
+   * @returns 失败信息;undefined 表示文件已删掉或本来就没有。
+   */
+  private async removeSessionFiles(
+    persistence: { locate(header: { id: string }): { kind: string; path: string } | undefined },
+    header: StoredSessionHeader,
+  ): Promise<string | undefined> {
+    const targets = new Set<string>()
+    try {
+      const loc = persistence.locate(header)
+      if (loc !== undefined && loc.path) targets.add(dirname(loc.path))
+    } catch { /* locate 不存在/抛错 → 交给扫描兜底 */ }
+    try {
+      const root = join(await this.getHome(), 'sessions')
+      if (existsSync(root)) {
+        for (const sub of readdirSync(root)) {
+          const dir = join(root, sub, header.id)
+          if (existsSync(dir)) targets.add(dir)
+        }
+      }
+    } catch { /* 扫描失败不影响 locate 结果 */ }
+    if (targets.size === 0) return undefined
+    let failed: string | undefined
+    for (const dir of targets) {
+      try { rmSync(dir, { recursive: true, force: true }) } catch (err) {
+        failed = `删除会话文件失败:${(err as { message?: string })?.message || String(err)}`
+      }
+    }
+    return failed
   }
 
   /** Forget a session everywhere: patched dsh has forgetSession; stock dsh falls back to per-workspace detach. */
@@ -3543,7 +3574,7 @@ export class ZatMarketGateway extends TypertRemoteService {
   }
 
   /** 删除一个子代理会话(文件 + 记账 + 内存),尽力而为,单个失败不中断级联。 */
-  private async purgeSubagent(id: string, header: { id: string; origin?: string }): Promise<void> {
+  private async purgeSubagent(id: string, header: StoredSessionHeader): Promise<void> {
     const agents = this.agentsFace
     const agent = agents ? agents.get(id) : undefined
     if (agent !== undefined) {
@@ -3552,10 +3583,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       } catch { /* 继续删文件/记账 */ }
     }
     const persistence = this.persistenceFace
-    const location = persistence ? persistence.locate(header) : undefined
-    if (location !== undefined) {
-      try { rmSync(dirname(location.path), { recursive: true, force: true }) } catch { /* 文件删不动不阻塞 */ }
-    }
+    if (persistence !== undefined) await this.removeSessionFiles(persistence, header)
     const registry = this.workspaceRegistryFace
     if (registry !== undefined) await this.forgetSessionCompat(registry, id)
     try {

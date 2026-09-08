@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.7.5
+
+- **删除的会话不再"复活"到未分组**:v0.7.4 归一化会话头时丢了 `cwd`,而会话目录路径由 `cwd` 决定——删除实际删的是一个不存在的目录,文件仍在,刷新后会话又出现。现在保留完整 header,并额外扫描 `<DSH_HOME>/sessions` 兜底;子代理级联删除同样修正
+
 ### v0.7.4
 
 - **对话管理适配新版 dsh**:`sessionPersistence.list()` 现在返回 `{ header, … }` 快照(投影缓存升到 v7),旧代码把快照当 header 读——标题全空、时间全 1970、子代理会话没被过滤(于是冒出一堆陌生对话)。现在两种形状都兼容:标题/时间从 `header` 或投影缓存 `record.identity` 取,子代理会话按 `origin`/`delegationDepth` 隐藏,删除与级联删除同样修正
