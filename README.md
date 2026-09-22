@@ -123,6 +123,10 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.8.0
+
+- **适配 DSH 0.1.7+：插件市场恢复可用**:0.1.7 的 typert-loader 收紧校验,要求每个 codec 带 `create()` 工厂(只校验存在、不调用),而本引擎的严格 codec 只写了 `schema`——整份 typert 清单被拒收(启动日志报 `1 entry did not activate` / `parameter codec has no create() factory`),22 个 pluginMarket 端点全部注册不上,市场打不开数据。现在 `schema` 与 `create` 并存:0.1.5 认 `schema`、0.1.7 认 `create`,两代 loader 都通过
+
 ### v0.7.5
 
 - **删除的会话不再"复活"到未分组**:v0.7.4 归一化会话头时丢了 `cwd`,而会话目录路径由 `cwd` 决定——删除实际删的是一个不存在的目录,文件仍在,刷新后会话又出现。现在保留完整 header,并额外扫描 `<DSH_HOME>/sessions` 兜底;子代理级联删除同样修正

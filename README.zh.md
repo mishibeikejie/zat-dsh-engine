@@ -125,6 +125,10 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.8.0
+
+- **适配 DSH 0.1.7+：插件市场恢复可用**:0.1.7 的 typert-loader 收紧校验,要求每个 codec 带 `create()` 工厂(只校验存在、不调用),而本引擎的严格 codec 只写了 `schema`——整份 typert 清单被拒收(启动日志报 `1 entry did not activate` / `parameter codec has no create() factory`),22 个 pluginMarket 端点全部注册不上,市场能打开但取不到数据。现在 `schema` 与 `create` 并存:0.1.5 认 `schema`、0.1.7 认 `create`,两代 loader 都通过
+
 ### v0.7.1
 
 - **更多插件能装了**:GitHub 仓库只放源码、构建产物发布到 npm 的插件(如 dsh-comfyui)之前被「入口文件缺失」拦截;现在会自动识别 npm 上的同源发布并改从 npm 安装
