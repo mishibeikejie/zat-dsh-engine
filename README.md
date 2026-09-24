@@ -123,6 +123,11 @@ Each of these is the minimal permission set required for the market to work; if 
 
 ## Changelog
 
+### v0.8.2
+
+- **对话管理删除清不干净(适配 DSH 0.1.7 的工作区注册表)**:0.1.7 去掉了 `forgetSession`,同时新增了注册表级的**置顶**集合,并把**归档**集合留在注册表里。旧实现只按 `detachSession` 逐个工作区摘除——但归档的会话不在任何工作区的 `sessionIds` 里,置顶项更是完全在工作区之外,于是删除后归档/置顶记录残留(表现为删过的会话仍在某些列表里冒头)。现在删除时显式调用 0.1.7 的 `unarchiveSession` / `unpinSession`(旧版没有这两个方法,可选调用不影响),并在最后**回读注册表校验**:确实还残留才提示,不再一律提示"此版本缺少清理方法"
+- **版本号与包版本对齐**:0.8.1 只改了 `package.json`,代码里的 `SELF_VERSION` 仍停在 `0.8.0`,而市场自查更新用的是"远端 package.json 版本"对比 `SELF_VERSION`——0.8.1 > 0.8.0 恒成立,于是每次打开都提示有新版本、点更新装完还提示。现在两者一致
+
 ### v0.8.1
 
 - **浏览器侧补上 DSH 0.1.7 的 `create()` 契约(市场面板才算真正恢复)**:v0.8.0 只修了 host 侧的 typert 清单,client 侧的 strict codec 仍只有 `schema`,而 0.1.7 的 `dsh-typert-registry` 与 loader 用的是同一条校验(`strict codec has no create() factory`)——客户端 `remote.$mount()` 第一步就抛错,entry 状态变 failed,界面报 `web boot: 1 entry did not activate` / `zat-dsh-engine: failed`。现在 client 侧 codec 也带 `create: () => schema`,两代 loader 都通过

@@ -285,7 +285,7 @@ const TTL = 24 * 60 * 60 * 1000
 const ZH_TTL = 365 * 24 * 60 * 60 * 1000
 const MIRROR = 'https://gh-proxy.com/'
 const SELF_REPO = 'mishibeikejie/zat-dsh-engine'
-const SELF_VERSION = '0.8.0'
+const SELF_VERSION = '0.8.2'
 
 const CATEGORY_QUERY: Record<string, string> = {
   '全部': '',
@@ -3339,8 +3339,8 @@ export class ZatMarketGateway extends TypertRemoteService {
     return this.ctx.get('sessionPersistence') as unknown as { list(): Promise<readonly unknown[]>; locate(header: { id: string }): { kind: string; path: string } | undefined } | undefined
   }
 
-  private get workspaceRegistryFace(): { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined {
-    return this.ctx.get('workspaceRegistry') as unknown as { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds: readonly string[]; forgetSession?: (id: string) => Promise<void> } | undefined
+  private get workspaceRegistryFace(): { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds?: readonly string[]; readonly pinnedSessionIds?: readonly string[]; forgetSession?: (id: string) => Promise<void>; unarchiveSession?: (id: string) => Promise<void>; unpinSession?: (id: string) => Promise<void> } | undefined {
+    return this.ctx.get('workspaceRegistry') as unknown as { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds?: readonly string[]; readonly pinnedSessionIds?: readonly string[]; forgetSession?: (id: string) => Promise<void>; unarchiveSession?: (id: string) => Promise<void>; unpinSession?: (id: string) => Promise<void> } | undefined
   }
 
   private get agentsFace(): { get(id: string): { status: string; ctx?: { dispose?: () => unknown } } | undefined } | undefined {
@@ -3409,7 +3409,7 @@ export class ZatMarketGateway extends TypertRemoteService {
           live,
           // 子代理会话必须隐藏:origin 是主判据,delegationDepth 兜住只有深度的新会话。
           subagent: h.origin === 'subagent' || (typeof h.delegationDepth === 'number' && h.delegationDepth > 0),
-          archived: archived.includes(id),
+          archived: (archived ?? []).includes(id),
           inWorkspace: workspaces.some((w) => (w.sessionIds as readonly string[]).includes(id)),
         })
       }
@@ -3448,7 +3448,7 @@ export class ZatMarketGateway extends TypertRemoteService {
       const header = (await persistence.list()).map(listHeader).find((c) => c?.id === id)
       const registry = this.workspaceRegistryFace
       if (header === undefined) {
-        const accounted = registry !== undefined && (registry.archivedSessionIds.includes(id)
+        const accounted = registry !== undefined && ((registry.archivedSessionIds ?? []).includes(id)
           || registry.list().some((w) => (w.sessionIds as readonly string[]).includes(id)))
         if (!accounted) return { ok: false, message: '没有找到这个会话' }
         await this.forgetSessionCompat(registry, id)
@@ -3531,18 +3531,36 @@ export class ZatMarketGateway extends TypertRemoteService {
     return failed
   }
 
-  /** Forget a session everywhere: patched dsh has forgetSession; stock dsh falls back to per-workspace detach. */
-  private async forgetSessionCompat(registry: { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; forgetSession?: (id: string) => Promise<void> }, id: string): Promise<string> {
+  /**
+   * Forget a session everywhere the registry can remember it.
+   *
+   * dsh 0.1.7 changed the registry surface: `forgetSession` (the patched fast path) is gone, while the
+   * archived set and the brand-new registry-global **pin** set both keep an id after the session is
+   * deleted. `detachSession` alone cannot clear them: an archived session sits in no workspace's
+   * `sessionIds`, so the detach loop never sees it, and a pin lives outside the workspaces entirely.
+   * So drop both explicitly (0.1.7 ships `unarchiveSession` / `unpinSession`; older builds lack them and
+   * are untouched by the optional calls), then detach per workspace.
+   * The returned warning is a post-condition check, not a guess: it fires only while the registry still
+   * reports the id as archived or pinned after every attempt.
+   * @param registry - the workspace registry face.
+   * @param id - the session to forget.
+   * @returns a user-facing warning, or `''` when no trace is left.
+   */
+  private async forgetSessionCompat(registry: { list(): Array<{ sessionIds: readonly string[]; detachSession?: (id: string) => Promise<void> }>; readonly archivedSessionIds?: readonly string[]; readonly pinnedSessionIds?: readonly string[]; forgetSession?: (id: string) => Promise<void>; unarchiveSession?: (id: string) => Promise<void>; unpinSession?: (id: string) => Promise<void> }, id: string): Promise<string> {
     if (typeof registry.forgetSession === 'function') {
-      await registry.forgetSession(id)
-      return ''
+      try { await registry.forgetSession(id) } catch { /* fall through to the explicit cleanup below */ }
     }
+    try { if (typeof registry.unarchiveSession === 'function') await registry.unarchiveSession(id) } catch { /* not archived / unsupported */ }
+    try { if (typeof registry.unpinSession === 'function') await registry.unpinSession(id) } catch { /* not pinned / unsupported */ }
     for (const w of registry.list()) {
       if ((w.sessionIds as readonly string[]).includes(id) && typeof w.detachSession === 'function') {
         try { await w.detachSession(id) } catch { /* keep going */ }
       }
     }
-    return '此版本 dsh 缺少清理归档记录的方法,归档集合里可能残留一条记录(不影响使用)'
+    const stillArchived = (registry.archivedSessionIds ?? []).includes(id)
+    const stillPinned = (registry.pinnedSessionIds ?? []).includes(id)
+    if (stillArchived || stillPinned) return '会话已删除,但此版本 dsh 的归档或置顶记录没清干净(不影响使用)'
+    return ''
   }
 
   /** 收集某主会话的全部子代理后代(按 parentSession 链,含孙辈)。只跟子代理节点,不动 fork 等普通子会话。 */
