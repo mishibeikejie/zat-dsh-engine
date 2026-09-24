@@ -125,6 +125,11 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.8.1
+
+- **浏览器侧补上 DSH 0.1.7 的 `create()` 契约(市场面板才算真正恢复)**:v0.8.0 只修了 host 侧的 typert 清单,client 侧的 strict codec 仍只有 `schema`,而 0.1.7 的 `dsh-typert-registry` 与 loader 用的是同一条校验(`strict codec has no create() factory`)——客户端 `remote.$mount()` 第一步就抛错,entry 状态变 failed,界面报 `web boot: 1 entry did not activate` / `zat-dsh-engine: failed`。现在 client 侧 codec 也带 `create: () => schema`,两代 loader 都通过
+- **去掉已不存在的 client inject**:`dsh.client.inject` 里的 `@deepseek-ai/dsh-client-runtime` 自 DSH 0.1.2-alpha.1 起已被上游删除(0.1.1-rc.2 还留有该包),而 0.1.7 新增的浏览器侧 entry 审计会把这条无法满足的依赖判为启动失败。本引擎并未实际引用该包,已移除
+
 ### v0.8.0
 
 - **适配 DSH 0.1.7+：插件市场恢复可用**:0.1.7 的 typert-loader 收紧校验,要求每个 codec 带 `create()` 工厂(只校验存在、不调用),而本引擎的严格 codec 只写了 `schema`——整份 typert 清单被拒收(启动日志报 `1 entry did not activate` / `parameter codec has no create() factory`),22 个 pluginMarket 端点全部注册不上,市场能打开但取不到数据。现在 `schema` 与 `create` 并存:0.1.5 认 `schema`、0.1.7 认 `create`,两代 loader 都通过

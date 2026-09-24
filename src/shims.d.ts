@@ -40,7 +40,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   }
 
   export type TypertCodec =
-    | { mode: 'strict'; typeSymbol: string; schema: TypertSchema }
+    | { mode: 'strict'; typeSymbol: string; schema: TypertSchema; create: () => TypertSchema }
     | { mode: 'src-json' }
 
   export interface InvocationParameterDescriptor {

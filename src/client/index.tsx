@@ -16,6 +16,7 @@ import type {
   TypertClientRemote,
   TypertCodec,
   TypertRemoteNamespace,
+  TypertSchema,
 } from '@deepseek-ai/dsh-typert-protocol'
 
 // ── wire contracts ──────────────────────────────────────────────────────
@@ -156,10 +157,16 @@ interface MarketRemote extends TypertClientRemote {
 
 // ── strict descriptors (identity schema; the host validates on its side) ──
 
+// DSH 0.1.7 起,typert-loader(host 侧)与 typert-registry(浏览器侧)都要求 strict
+// codec 带 create() 工厂(只校验存在、不调用)。两代并存才双向兼容:0.1.5 认 schema、
+// 0.1.7 认 create。缺 create 时整份 descriptors 被 registry 拒收,客户端 entry 状态
+// 直接 failed——界面报 "web boot: 1 entry did not activate / zat-dsh-engine: failed"。
+const jsonSchema: TypertSchema = { parse: (value: unknown) => value }
 const jsonCodec: TypertCodec = {
   mode: 'strict',
   typeSymbol: 'zat-dsh-engine/json',
-  schema: { parse: (value: unknown) => value },
+  schema: jsonSchema,
+  create: () => jsonSchema,
 }
 
 function params(...names: string[]): InvocationParameterDescriptor[] {
