@@ -125,6 +125,10 @@ cp ~/.dsh/profiles/web/zat-backup/* ~/.dsh/profiles/web/
 
 ## 更新日志
 
+### v0.8.2
+
+- **修版本号漏改(市场不再永远提示"有新版本")**:v0.8.1 只改了 `package.json`,忘了同步代码里的 `SELF_VERSION`(仍停在 `0.8.0`)。而市场自查更新用的是"远端 HEAD 的 package.json 版本"对比 `SELF_VERSION`——0.8.1 > 0.8.0 恒成立,于是**每次打开都提示有新版本、点更新装完还提示**,界面显示的引擎版本也与实际不符。现在 `SELF_VERSION` 与包版本一致
+
 ### v0.8.1
 
 - **浏览器侧补上 DSH 0.1.7 的 `create()` 契约(市场面板才算真正恢复)**:v0.8.0 只修了 host 侧的 typert 清单,client 侧的 strict codec 仍只有 `schema`,而 0.1.7 的 `dsh-typert-registry` 与 loader 用的是同一条校验(`strict codec has no create() factory`)——客户端 `remote.$mount()` 第一步就抛错,entry 状态变 failed,界面报 `web boot: 1 entry did not activate` / `zat-dsh-engine: failed`。现在 client 侧 codec 也带 `create: () => schema`,两代 loader 都通过
